@@ -1,5 +1,7 @@
 # HiveMind JS
 
+![logo](./hivemindjs.png)
+
 javascript client for HiveMind
 
 ## Usage
