@@ -13,9 +13,9 @@ javascript client for HiveMind
 <head>
     <meta charset="UTF-8">
     <title>HiveMindJs Demo</title>
-    <script src="static/js/asmcrypto.js"></script>
-    <script src="static/js/webcrypto-shim.js"></script>
-    <script src="static/js/hivemind.js"></script>
+    <script src="https://jarbashivemind.github.io/HiveMind-js/static/js/smcrypto.js"></script>
+    <script src="https://jarbashivemind.github.io/HiveMind-js/static/js/webcrypto-shim.js"></script>
+    <script src="https://jarbashivemind.github.io/HiveMind-js/static/js/hivemind.js"></script>
 </head>
 
 <body>
