@@ -90,6 +90,7 @@ JarbasHiveMind.prototype.onHiveDisconnected = function() {
 JarbasHiveMind.prototype.connect = function(host, port, username, accessKey, encryptionKey) {
     let address = 'ws://' + host + ":" + port
     let authToken = btoa(username + ":" + accessKey);
+    this.encryptionKey = encryptionKey
     this.ws = new WebSocket(address + "?authorization=" + authToken);
     this.ws.onopen = this.onHiveConnected
     this.ws.onmessage = this.onHiveMessage
