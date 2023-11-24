@@ -108,7 +108,7 @@ JarbasHiveMind.prototype.sendMessage = async function (message) {
     if (this.encryptionKey) {
         message = await this.encrypt_msg(JSON.stringify(hive_msg))
     }
-    this.ws.send(JSON.stringify(message));
+    await this.ws.send(JSON.stringify(message));
 }
 
 // mycroft api
@@ -116,6 +116,23 @@ JarbasHiveMind.prototype.sendUtterance = async function (utterance) {
     let payload = {
         'type': "recognizer_loop:utterance",
         "data": {"utterances": [utterance]},
+        "context": {
+            "source": "javascript",
+            "destination": "HiveMind",
+            "platform": "JarbasHivemindJsV0.1"
+        }
+    };
+    await this.sendMessage({
+        'msg_type': "bus",
+        "payload": payload
+    });
+
+}
+
+JarbasHiveMind.prototype.sendAudioB64 = async function (base64) {
+     let payload = {
+        'type': "recognizer_loop:b64_audio",
+        "data": {"audio": base64},
         "context": {
             "source": "javascript",
             "destination": "HiveMind",
