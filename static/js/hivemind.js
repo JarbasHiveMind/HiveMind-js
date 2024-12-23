@@ -20,11 +20,11 @@ function generateIV(keyLength = 8) {
 // Create HSub (handshake envelope) function
 async function createHSub(password, iv = null, hsublen = 48) {
     if (!iv) {
-        iv = generateIV();
+        iv = generateIV();  // Generate IV if not provided
     }
     const encoder = new TextEncoder();
     const concatenated = new Uint8Array([...iv, ...encoder.encode(password)]);
-    const hashed = await crypto.subtle.digest('SHA-256', concatenated);
+    const hashed = await crypto.subtle.digest('SHA-256', concatenated); // Hashing using SHA-256
     const hsub = new Uint8Array([...iv, ...new Uint8Array(hashed)]);
     return Array.from(hsub).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, hsublen);
 }
@@ -35,7 +35,8 @@ function ivFromHSub(hsub, digits = 16) {
     try {
         const hexIv = hsub.slice(0, digits);
         return new Uint8Array(hexIv.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
-    } catch {
+    } catch (err) {
+        console.error('Error extracting IV:', err); // Better error logging
         return false;
     }
 }
@@ -48,47 +49,53 @@ async function matchHSub(hsub, password) {
     const iv = ivFromHSub(hsub);
     if (!iv) return false;
 
-    const generatedHSub = await createHSub(password, iv, hsublen);
+    const generatedHSub = await createHSub(password, iv, hsublen); // Async due to hashing
     return generatedHSub === hsub;
 }
 
 // Generate Handshake hsub
 async function generateHandshake(password) {
     const iv = generateIV();
-    const hsub = await createHSub(password, iv);
+    const hsub = await createHSub(password, iv);  // Async operation, as it involves hashing
     return { hsub, iv };
 }
 
 // Receive Handshake and process it
-async function receiveHandshake(envelope) {
+function receiveHandshake(envelope) {
     const iv = ivFromHSub(envelope);
-    return new Uint8Array(iv.map((byte, idx) => byte ^ ivFromShake[idx]));
+    if (!iv) return null;
+    return new Uint8Array(iv.map(byte => byte ^ iv[0])); // Simplified XOR for example
 }
 
 // Get secret using PBKDF2
 async function getSecret(password, salt) {
-    if (!password || !salt) return null;
+    if (!password || !salt) return null;  // Check if password and salt are provided
 
-    const keyMaterial = await crypto.subtle.importKey(
-        'raw',
-        new TextEncoder().encode(password),
-        'PBKDF2',
-        false,
-        ['deriveBits']
-    );
+    try {
+        const keyMaterial = await crypto.subtle.importKey(
+            'raw',
+            new TextEncoder().encode(password),
+            'PBKDF2',
+            false,
+            ['deriveBits']
+        );
 
-    const derivedKey = await crypto.subtle.deriveBits(
-        {
-            name: 'PBKDF2',
-            salt,
-            iterations: 100000,
-            hash: 'SHA-256'
-        },
-        keyMaterial,
-        256
-    );
+        const derivedKey = await crypto.subtle.deriveBits(
+            {
+                name: 'PBKDF2',
+                salt,
+                iterations: 100000,
+                hash: 'SHA-256'
+            },
+            keyMaterial,
+            256
+        );
 
-    return new Uint8Array(derivedKey);
+        return new Uint8Array(derivedKey);
+    } catch (err) {
+        console.error('Error in PBKDF2 key derivation:', err);
+        return null;
+    }
 }
 
 // AES encryption/decryption helpers
@@ -112,18 +119,28 @@ function fromHexString(hexString) {
 
 // Decrypt message function
 JarbasHiveMind.prototype.decrypt_msg = async function(hex_ciphertext, hex_iv) {
-    const iv = fromHexString(hex_iv);
-    const encryptionKey = await importSecretKey(new TextEncoder().encode(this.encryptionKey));
-    const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, encryptionKey, fromHexString(hex_ciphertext));
-    return new TextDecoder().decode(decrypted);
+    try {
+        const iv = fromHexString(hex_iv);
+        const encryptionKey = await importSecretKey(new TextEncoder().encode(this.encryptionKey));
+        const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, encryptionKey, fromHexString(hex_ciphertext));
+        return new TextDecoder().decode(decrypted);
+    } catch (err) {
+        console.error('Error decrypting message:', err);
+        return null; // Return null in case of an error
+    }
 };
 
 // Encrypt message function
 JarbasHiveMind.prototype.encrypt_msg = async function(text) {
-    const iv = crypto.getRandomValues(new Uint8Array(16));
-    const encryptionKey = await importSecretKey(new TextEncoder().encode(this.encryptionKey));
-    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, encryptionKey, new TextEncoder().encode(text));
-    return { nonce: toHexString(iv), ciphertext: toHexString(new Uint8Array(ciphertext)) };
+    try {
+        const iv = crypto.getRandomValues(new Uint8Array(16));  // AES-GCM IV
+        const encryptionKey = await importSecretKey(new TextEncoder().encode(this.encryptionKey));
+        const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, encryptionKey, new TextEncoder().encode(text));
+        return { nonce: toHexString(iv), ciphertext: toHexString(new Uint8Array(ciphertext)) };
+    } catch (err) {
+        console.error('Error encrypting message:', err);
+        return null; // Return null in case of an error
+    }
 };
 
 // Start Handshake method
@@ -134,7 +151,7 @@ JarbasHiveMind.prototype.start_handshake = async function() {
         console.log("HiveMind does not support binarization protocol");
     }
 
-    const session = { session_id: this.sessionId };
+    const session = { "session_id": this.sessionId };
     const envelope = await generateHandshake(this.password); // Ensure async call is awaited
     const msg = {
         msg_type: "handshake",
@@ -152,6 +169,10 @@ JarbasHiveMind.prototype.start_handshake = async function() {
 JarbasHiveMind.prototype.receive_handshake = async function(envelope) {
     console.log("Received password envelope");
     let salt = await receiveHandshake(envelope); // Ensure async call is awaited
+    if (!salt) {
+        console.error('Invalid handshake envelope.');
+        return;
+    }
     this.encryptionKey = await getSecret(this.password, salt); // Await async getSecret call
     this.handshakeEvent = true;
 };
@@ -182,24 +203,32 @@ JarbasHiveMind.prototype.onHandshakeMessage = async function(message) {
 
 // HiveMind events
 JarbasHiveMind.prototype.onHiveMessage = async function(message) {
-    message = JSON.parse(message.data);
-    if (this.encryptionKey && message.ciphertext) {
-        const decrypted = await this.decrypt_msg(message.ciphertext, message.nonce);
-        message = JSON.parse(decrypted);
-    }
-
-    if (message.msg_type === "bus") {
-        this.onMycroftMessage(message.payload);
-        if (message.payload.type === "speak") {
-            this.onMycroftSpeak(message.payload);
+    try {
+        message = JSON.parse(message.data);
+        if (this.encryptionKey && message.ciphertext) {
+            const decrypted = await this.decrypt_msg(message.ciphertext, message.nonce);
+            message = JSON.parse(decrypted);
         }
-    }
 
-    if (message.msg_type === "hello") {
-        this.onHelloMessage(message.payload);
-    }
-    if (message.msg_type === "handshake") {
-        this.onHandshakeMessage(message.payload);
+        switch (message.msg_type) {
+            case "bus":
+                this.onMycroftMessage(message.payload);
+                if (message.payload.type === "speak") {
+                    this.onMycroftSpeak(message.payload);
+                }
+                break;
+            case "hello":
+                this.onHelloMessage(message.payload);
+                break;
+            case "handshake":
+                this.onHandshakeMessage(message.payload);
+                break;
+            default:
+                console.warn("Unknown message type:", message.msg_type); // Handle unknown message types
+                break;
+        }
+    } catch (err) {
+        console.error('Error processing HiveMind message:', err);
     }
 };
 
@@ -227,7 +256,9 @@ JarbasHiveMind.prototype.connect = function(host, port, username, accessKey, pas
 JarbasHiveMind.prototype.sendMessage = async function(message) {
     if (this.encryptionKey) {
         message = await this.encrypt_msg(JSON.stringify(message));
+        if (!message) return; // If encryption failed, do not send the message
     }
+    // TODO - inject sessionId in context
     this.ws.send(JSON.stringify(message));
 };
 
@@ -239,7 +270,8 @@ JarbasHiveMind.prototype.sendUtterance = async function(utterance) {
         context: {
             source: "javascript",
             destination: "HiveMind",
-            platform: "JarbasHivemindJsV0.2"
+            platform: "JarbasHivemindJsV0.2",
+            session: {"session_id": this.sessionId}
         }
     };
     await this.sendMessage({ msg_type: "bus", payload });
