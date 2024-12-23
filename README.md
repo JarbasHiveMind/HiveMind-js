@@ -21,11 +21,10 @@ javascript client for HiveMind
 <body>
     <script type="text/javascript">
         // HiveMind socket
-        const user = "HivemindWebChat";
-        const key = "ivf1NQSkQNogWYyr";
+        const useragent = "HivemindWebChat";
         const ip = "127.0.0.1";
         const port = 5678;
-        const crypto_key = "ivf1NQSkQNogWYyr";
+        const password = "ivf1NQSkQNogWYyr";
         
         const hivemind_connection = new JarbasHiveMind()
 
@@ -42,7 +41,7 @@ javascript client for HiveMind
             window.alert("Hivemind connection lost...")
         };
 
-        hivemind_connection.connect(ip, port, user, key, crypto_key);
+        hivemind_connection.connect(ip, port, useragent, key, password);
 
         setTimeout(() => hivemind_connection.sendUtterance("tell me a joke"), 5000)
 
