@@ -3,10 +3,11 @@ function JarbasHiveMind() {
     this.sessionId = null;
     this.binarize = false;
     this.siteId = "cyberspace";
-    this.handshakeEvent = false
+    this.handshakeEvent = false;
+    this.encryptionKey = null;
 }
 
-// Handshake
+// Helper function to generate a random IV
 function generateIV(keyLength = 8) {
     const validChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     let iv = '';
@@ -16,6 +17,7 @@ function generateIV(keyLength = 8) {
     return new TextEncoder().encode(iv); // Return as Uint8Array
 }
 
+// Create HSub (handshake envelope) function
 async function createHSub(password, iv = null, hsublen = 48) {
     if (!iv) {
         iv = generateIV();
@@ -27,6 +29,7 @@ async function createHSub(password, iv = null, hsublen = 48) {
     return Array.from(hsub).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, hsublen);
 }
 
+// Extract IV from HSub
 function ivFromHSub(hsub, digits = 16) {
     if (hsub.length < digits) return false;
     try {
@@ -37,6 +40,7 @@ function ivFromHSub(hsub, digits = 16) {
     }
 }
 
+// Match HSub with password
 async function matchHSub(hsub, password) {
     const hsublen = hsub.length;
     if (hsublen < 48 || hsublen > 80) return false;
@@ -48,17 +52,20 @@ async function matchHSub(hsub, password) {
     return generatedHSub === hsub;
 }
 
+// Generate Handshake hsub
 async function generateHandshake(password) {
     const iv = generateIV();
     const hsub = await createHSub(password, iv);
     return { hsub, iv };
 }
 
+// Receive Handshake and process it
 async function receiveHandshake(envelope) {
     const iv = ivFromHSub(envelope);
     return new Uint8Array(iv.map((byte, idx) => byte ^ ivFromShake[idx]));
 }
 
+// Get secret using PBKDF2
 async function getSecret(password, salt) {
     if (!password || !salt) return null;
 
@@ -84,7 +91,7 @@ async function getSecret(password, salt) {
     return new Uint8Array(derivedKey);
 }
 
-// AES encryption
+// AES encryption/decryption helpers
 function importSecretKey(rawKey) {
     return crypto.subtle.importKey(
         "raw",
@@ -103,6 +110,7 @@ function fromHexString(hexString) {
     return new Uint8Array(hexString.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
 }
 
+// Decrypt message function
 JarbasHiveMind.prototype.decrypt_msg = async function(hex_ciphertext, hex_iv) {
     const iv = fromHexString(hex_iv);
     const encryptionKey = await importSecretKey(new TextEncoder().encode(this.encryptionKey));
@@ -110,6 +118,7 @@ JarbasHiveMind.prototype.decrypt_msg = async function(hex_ciphertext, hex_iv) {
     return new TextDecoder().decode(decrypted);
 };
 
+// Encrypt message function
 JarbasHiveMind.prototype.encrypt_msg = async function(text) {
     const iv = crypto.getRandomValues(new Uint8Array(16));
     const encryptionKey = await importSecretKey(new TextEncoder().encode(this.encryptionKey));
@@ -117,16 +126,16 @@ JarbasHiveMind.prototype.encrypt_msg = async function(text) {
     return { nonce: toHexString(iv), ciphertext: toHexString(new Uint8Array(ciphertext)) };
 };
 
-// Handshake methods
+// Start Handshake method
 JarbasHiveMind.prototype.start_handshake = async function() {
     if (this.binarize) {
-        console.log("hivemind supports binarization protocol");
+        console.log("HiveMind supports binarization protocol");
     } else {
-        console.log("hivemind does not support binarization protocol");
+        console.log("HiveMind does not support binarization protocol");
     }
 
     const session = { session_id: this.sessionId };
-    const envelope = generateHandshake(this.password)
+    const envelope = await generateHandshake(this.password); // Ensure async call is awaited
     const msg = {
         msg_type: "handshake",
         payload: {
@@ -139,14 +148,15 @@ JarbasHiveMind.prototype.start_handshake = async function() {
     this.sendMessage(msg);
 };
 
+// Receive Handshake message
 JarbasHiveMind.prototype.receive_handshake = async function(envelope) {
     console.log("Received password envelope");
-    let salt = receiveHandshake(envelope)
-    this.encryptionKey = getSecret(password, salt)
-    this.handshakeEvent = true
+    let salt = await receiveHandshake(envelope); // Ensure async call is awaited
+    this.encryptionKey = await getSecret(this.password, salt); // Await async getSecret call
+    this.handshakeEvent = true;
 };
 
-
+// Handle Hello message
 JarbasHiveMind.prototype.onHelloMessage = function(message) {
     if (message.payload.session_id) {
         this.sessionId = message.payload.session_id;
@@ -154,18 +164,18 @@ JarbasHiveMind.prototype.onHelloMessage = function(message) {
     }
 };
 
+// Handle Handshake message
 JarbasHiveMind.prototype.onHandshakeMessage = async function(message) {
     if (message.payload.envelope) {
         console.log("Received password envelope");
-        let salt = receiveHandshake(message.payload.envelope)
-        this.encryptionKey = getSecret(this.password, salt)
-        this.handshakeEvent = true
+        let salt = await receiveHandshake(message.payload.envelope); // Ensure async call is awaited
+        this.encryptionKey = await getSecret(this.password, salt); // Await async getSecret call
+        this.handshakeEvent = true;
     } else {
-        console.log("handshake failed, retrying. only password handshake is currently supported")
+        console.log("Handshake failed, retrying. Only password handshake is currently supported.");
 
-        // TODO support binarize in future PR
+        // TODO: support binarize in future PR
         this.binarize = message.payload.binarize || false;
-
         await this.start_handshake();
     }
 };
@@ -195,6 +205,7 @@ JarbasHiveMind.prototype.onHiveMessage = async function(message) {
 
 JarbasHiveMind.prototype.onHiveConnected = function() {
     console.log("connected");
+    this.start_handshake()
 };
 
 JarbasHiveMind.prototype.onHiveDisconnected = function() {
@@ -212,6 +223,7 @@ JarbasHiveMind.prototype.connect = function(host, port, username, accessKey, pas
     this.ws.onclose = this.onHiveDisconnected;
 };
 
+// Send message method
 JarbasHiveMind.prototype.sendMessage = async function(message) {
     if (this.encryptionKey) {
         message = await this.encrypt_msg(JSON.stringify(message));
@@ -219,7 +231,7 @@ JarbasHiveMind.prototype.sendMessage = async function(message) {
     this.ws.send(JSON.stringify(message));
 };
 
-// Mycroft API
+// Send utterance method
 JarbasHiveMind.prototype.sendUtterance = async function(utterance) {
     const payload = {
         type: "recognizer_loop:utterance",
@@ -233,11 +245,12 @@ JarbasHiveMind.prototype.sendUtterance = async function(utterance) {
     await this.sendMessage({ msg_type: "bus", payload });
 };
 
-// Mycroft events
+// Handle speak message
 JarbasHiveMind.prototype.onMycroftSpeak = function(mycroft_message) {
     console.log("mycroft.speak - " + mycroft_message.data.utterance);
 };
 
+// Handle general Mycroft message
 JarbasHiveMind.prototype.onMycroftMessage = function(mycroft_message) {
     console.log(mycroft_message);
 };
