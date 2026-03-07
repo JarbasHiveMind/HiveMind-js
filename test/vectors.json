@@ -1,0 +1,27 @@
+{
+  "hsub": {
+    "password": "test-password-123",
+    "iv_hex": "deadbeefcafebabe",
+    "expected_hsub": "deadbeefcafebabe47f0753a5a76dd104638641f6f108805"
+  },
+  "pbkdf2": {
+    "password": "test-password-123",
+    "salt_hex": "0102030405060708",
+    "expected_key_hex": "b0e2f9ac3479409d6e6c03adf0ec8b5b398faed914c4c520acc6986c5246bc7e"
+  },
+  "aes_gcm": {
+    "key_hex": "b0e2f9ac3479409d6e6c03adf0ec8b5b398faed914c4c520acc6986c5246bc7e",
+    "plaintext": "{\"msg_type\":\"bus\",\"payload\":\"test\"}",
+    "nonce_hex": "00112233445566778899aabbccddeeff",
+    "ciphertext_hex": "b047e2a2679dfed698b2fdd8c80a36eed427d7bee172e22fd96dbc3e0ee211126ea32d",
+    "tag_hex": "7cbdd1106901fef79e50e70e8159d275"
+  },
+  "bitstring": {
+    "msg_type": "bus",
+    "payload": "{\"type\":\"test\"}",
+    "metadata": {},
+    "compressed": false,
+    "versioned": false,
+    "expected_hex": "82027b7d7b2274797065223a2274657374227d"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "hivemind-js",
+  "version": "0.2.0",
+  "description": "HiveMind Protocol V1 browser client",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
