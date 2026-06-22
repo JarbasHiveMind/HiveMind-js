@@ -155,3 +155,11 @@ JarbasHiveMind.prototype.onMycroftMessage = function (mycroft_message) {
     console.log(mycroft_message)
 }
 
+
+// Make the client usable from CommonJS / Node (e.g. e2e drivers) without
+// affecting browser usage where JarbasHiveMind is a global. The browser
+// expects WebSocket + crypto.subtle to exist; a Node consumer must polyfill
+// globalThis.WebSocket (e.g. with the `ws` package) before connecting.
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { JarbasHiveMind };
+}
