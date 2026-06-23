@@ -142,7 +142,7 @@ const INT_TO_MSG_TYPE = Object.fromEntries(
     Object.entries(MSG_TYPE_TO_INT).map(([k, v]) => [v, k])
 );
 
-var BIN_TYPES = {
+const BIN_TYPES = {
     UNDEFINED: 0, RAW_AUDIO: 1, NUMPY_IMAGE: 2, FILE: 3,
     STT_AUDIO_TRANSCRIBE: 4, STT_AUDIO_HANDLE: 5, TTS_AUDIO: 6
 };
@@ -412,7 +412,7 @@ PasswordHandShake.prototype.deriveSecret = async function () {
 // Connection states
 // ─────────────────────────────────────────────────────────────────────────────
 
-var States = {
+const States = {
     DISCONNECTED:    0,
     CONNECTING:      1,
     HELLO_RECEIVED:  2,
