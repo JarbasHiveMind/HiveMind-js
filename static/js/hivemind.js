@@ -493,6 +493,23 @@ JarbasHiveMind.prototype.sendUtterance = async function (utterance) {
     await this.sendMessage(hiveMsg);
 };
 
+// Convenience: stream base64-encoded audio to the hub as a bus message.
+// (ported from the V0 client's sendAudioB64, now routed through the V1
+// encrypted/handshake send path.)
+JarbasHiveMind.prototype.sendAudioB64 = async function (base64) {
+    var busMsg = {
+        type: 'recognizer_loop:b64_audio',
+        data: { audio: base64 },
+        context: {
+            source: 'javascript',
+            destination: 'HiveMind',
+            platform: 'JarbasHivemindJsV0.2'
+        }
+    };
+    var hiveMsg = this._wrap('bus', busMsg);
+    await this.sendMessage(hiveMsg);
+};
+
 // ── Event hooks — override in consumer code ───────────────────────────────────
 
 JarbasHiveMind.prototype.onHiveConnected    = function ()    { console.log('HiveMind connected'); };
