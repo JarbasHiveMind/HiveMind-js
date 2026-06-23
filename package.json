@@ -1,0 +1,48 @@
+{
+  "name": "hivemind-js",
+  "version": "0.2.0",
+  "description": "HiveMind Protocol V1 client for the browser and Node.js — no dependencies, native Web Crypto",
+  "license": "Apache-2.0",
+  "author": "JarbasAi <jarbasai@mailfence.com>",
+  "homepage": "https://github.com/JarbasHiveMind/HiveMind-js#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JarbasHiveMind/HiveMind-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JarbasHiveMind/HiveMind-js/issues"
+  },
+  "main": "static/js/hivemind.js",
+  "module": "static/js/hivemind.js",
+  "exports": {
+    ".": {
+      "require": "./static/js/hivemind.js",
+      "import": "./static/js/hivemind.js",
+      "default": "./static/js/hivemind.js"
+    }
+  },
+  "browser": "static/js/hivemind.js",
+  "files": [
+    "static/js/hivemind.js",
+    "docs",
+    "readme.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "hivemind",
+    "mycroft",
+    "ovos",
+    "openvoiceos",
+    "voice-assistant",
+    "websocket",
+    "protocol-v1",
+    "aes-gcm",
+    "web-crypto"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
