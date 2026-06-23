@@ -2,11 +2,19 @@
 
 ![logo](./hivemindjs.png)
 
-JavaScript client for HiveMind — Protocol V1.
+JavaScript client for HiveMind — Protocol V1. Runs in the browser and in Node.js 18+.
 
 No external dependencies. Uses the native [Web Crypto API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API) (`crypto.subtle`), available in all modern browsers and Node.js 18+.
 
-## Quick start
+## Install
+
+```bash
+npm install hivemind-js
+```
+
+Or just drop [`static/js/hivemind.js`](static/js/hivemind.js) into a page with a `<script>` tag — there is nothing to build and no runtime dependency.
+
+## Quick start (browser)
 
 ```html
 <!DOCTYPE html>
@@ -47,6 +55,37 @@ No external dependencies. Uses the native [Web Crypto API](https://developer.moz
 </body>
 </html>
 ```
+
+## Quick start (Node.js)
+
+In Node.js, supply a WebSocket implementation on `globalThis` (the client uses the
+browser `WebSocket` global). Any standard implementation such as [`ws`](https://www.npmjs.com/package/ws) works:
+
+```javascript
+// CommonJS
+const { JarbasHiveMind } = require('hivemind-js');
+globalThis.WebSocket = require('ws');
+
+// or ESM
+// import { JarbasHiveMind } from 'hivemind-js';
+// import WebSocket from 'ws';
+// globalThis.WebSocket = WebSocket;
+
+const hivemind = new JarbasHiveMind();
+
+hivemind.onHiveConnected = async () => {
+    console.log('connected');
+    await hivemind.sendUtterance('tell me a joke');
+};
+
+hivemind.onMycroftSpeak = (msg) => console.log('speak:', msg.data.utterance);
+
+// connect(host, port, username, accessKey, password)
+hivemind.connect('127.0.0.1', 5678, 'HivemindNode', 'ivf1NQSkQNogWYyr', 'mypassword');
+```
+
+`ws` is the only dependency Node needs, and only because Node lacks a built-in
+`WebSocket` global; the crypto and protocol code have no dependencies at all.
 
 ## API reference
 
@@ -154,11 +193,21 @@ Test suite (~40 tests across 4 files):
 | `test/handshake.test.js` | Full connection state machine with a `MockWebSocket` |
 | `test/binary.test.js` | Bitstring codec, binary encryption, binarize handshake negotiation, binary send/receive |
 
-To regenerate the cross-language test vectors (requires workspace venv):
+To regenerate the cross-language test vectors, run `test/generate_vectors.py` in a
+Python environment that has `hivemind-bus-client` and `poorman_handshake` installed.
+The vectors prove the JS crypto (hSub, PBKDF2 key derivation, AES-GCM, bitstring
+encoding) is byte-for-byte identical to the Python reference implementation:
 
 ```bash
-"/home/miro/PycharmProjects/HiveMind Workspace/.venv/bin/python" test/generate_vectors.py
+python3 test/generate_vectors.py
 ```
+
+### Live end-to-end test
+
+A live interop test in the [HiveMind test harness](https://github.com/JarbasHiveMind/hivemind-test-harness)
+(`tests/test_js_e2e.py`) launches this client against a real Python hivemind-core
+loopback hub, performs the full handshake, and exchanges an encrypted utterance — so
+the wire behaviour, not just the vectors, is verified end to end.
 
 ## File layout
 
