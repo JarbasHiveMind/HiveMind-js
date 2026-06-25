@@ -486,7 +486,10 @@ JarbasHiveMind.prototype.sendUtterance = async function (utterance) {
         context: {
             source: 'javascript',
             destination: 'HiveMind',
-            platform: 'JarbasHivemindJsV0.2'
+            platform: 'JarbasHivemindJsV0.2',
+            // Per-connection session — stock hivemind-core rejects bus messages
+            // that fall back to the 'default' session for non-admin clients.
+            session: { session_id: this._sessionId }
         }
     };
     var hiveMsg = this._wrap('bus', busMsg);
@@ -503,7 +506,8 @@ JarbasHiveMind.prototype.sendAudioB64 = async function (base64) {
         context: {
             source: 'javascript',
             destination: 'HiveMind',
-            platform: 'JarbasHivemindJsV0.2'
+            platform: 'JarbasHivemindJsV0.2',
+            session: { session_id: this._sessionId }
         }
     };
     var hiveMsg = this._wrap('bus', busMsg);
