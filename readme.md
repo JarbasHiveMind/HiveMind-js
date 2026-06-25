@@ -204,10 +204,27 @@ python3 test/generate_vectors.py
 
 ### Live end-to-end test
 
-A live interop test in the [HiveMind test harness](https://github.com/JarbasHiveMind/hivemind-test-harness)
-(`tests/test_js_e2e.py`) launches this client against a real Python hivemind-core
-loopback hub, performs the full handshake, and exchanges an encrypted utterance — so
-the wire behaviour, not just the vectors, is verified end to end.
+This repo ships a self-contained, hermetic interop test under
+[`test/e2e/`](test/e2e/). It boots a real Python `hivemind-core` hub on an
+in-process loopback transport, launches the Node driver
+([`test/e2e/js_e2e_driver.mjs`](test/e2e/js_e2e_driver.mjs)) which loads the actual
+`static/js/hivemind.js`, connects over a real WebSocket, performs the full V1
+handshake, and sends an encrypted utterance. The Python side then asserts the hub
+received that exact utterance with a real session id — so the wire behaviour, not
+just the vectors, is verified end to end. No external network or fixed ports.
+
+```bash
+# one-time: install the loopback-hub deps (test-only Python packages) and ws
+pip install -r test/e2e/requirements.txt
+npm install
+# run it
+npm run test:e2e          # == python3 test/e2e/loopback_hub.py
+```
+
+The same scenario also runs in the
+[HiveMind test harness](https://github.com/JarbasHiveMind/hivemind-test-harness)
+(`tests/test_js_e2e.py`), which drives this client as part of the cross-client
+conformance suite.
 
 ## File layout
 
@@ -219,12 +236,18 @@ HiveMind-js/
 │   ├── crypto.test.js       # PasswordHandShake unit tests
 │   ├── encryption.test.js   # AES-GCM unit tests
 │   ├── handshake.test.js    # State machine integration tests
+│   ├── binary.test.js       # Bitstring codec + binarize mode tests
 │   ├── generate_vectors.py  # Python script — regenerates vectors.json
-│   └── vectors.json         # Cross-compat test vectors (Python ↔ JS)
+│   ├── vectors.json         # Cross-compat test vectors (Python ↔ JS)
+│   └── e2e/
+│       ├── loopback_hub.py      # Boots a real hivemind-core loopback hub + asserts
+│       ├── js_e2e_driver.mjs    # Node driver — connects the real client to the hub
+│       └── requirements.txt     # Test-only Python deps for the hub
 ├── docs/
 │   ├── protocol.md          # HiveMessage wire format reference
 │   ├── handshake.md         # Handshake flow and PasswordHandShake spec
 │   ├── encryption.md        # Encryption wire format and Web Crypto notes
-│   └── binary.md            # Binary/binarize mode: bitstring format, BIN_TYPES, JS API
+│   ├── binary.md            # Binary/binarize mode: bitstring format, BIN_TYPES, JS API
+│   └── e2e.md               # End-to-end interop test: how the hub is provided
 └── package.json
 ```
