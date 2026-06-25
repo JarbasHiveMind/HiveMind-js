@@ -1,0 +1,7 @@
+# Test-only Python dependencies for the end-to-end interop test.
+# These boot a real hivemind-core hub on a loopback transport so the JS client
+# can be exercised over a real WebSocket. They are NOT runtime dependencies of
+# the JS package (which has no Python deps at all) — only the E2E job needs them.
+hivemind-core
+hivescope
+hivemind-bus-client

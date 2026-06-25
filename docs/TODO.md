@@ -49,6 +49,11 @@ All Protocol V1 features are implemented and tested. This file records what was 
 - [x] `test/handshake.test.js` — full connection state machine with `MockWebSocket`
 - [x] `test/binary.test.js` — bitstring codec, binary encryption, binarize handshake, send/receive
 
+### End-to-end (real hub)
+
+- [x] `test/e2e/loopback_hub.py` + `test/e2e/js_e2e_driver.mjs` — drive the real client against a real `hivemind-core` loopback hub over a real WebSocket; assert the utterance round-trips with a real session id (see `docs/e2e.md`)
+- [x] CI job `.github/workflows/e2e.yml` runs the e2e on PRs/pushes to `dev`/`master`
+
 ---
 
 ## Not planned / out of scope

@@ -29,7 +29,11 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "test:e2e": "python3 test/e2e/loopback_hub.py"
+  },
+  "devDependencies": {
+    "ws": "^8.18.0"
   },
   "keywords": [
     "hivemind",
