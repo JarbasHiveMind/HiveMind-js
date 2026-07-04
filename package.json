@@ -1,7 +1,7 @@
 {
   "name": "hivemind-js",
   "version": "0.2.0",
-  "description": "HiveMind Protocol V1 client for the browser and Node.js — no dependencies, native Web Crypto",
+  "description": "HiveMind protocol client for the browser and Node.js — native Web Crypto + @noble (ChaCha20-Poly1305, argon2id) for full v3 Noise cipher parity",
   "license": "Apache-2.0",
   "author": "JarbasAi <jarbasai@mailfence.com>",
   "homepage": "https://github.com/JarbasHiveMind/HiveMind-js#readme",
@@ -46,10 +46,16 @@
     "protocol-v3",
     "noise-protocol",
     "x25519",
+    "chacha20-poly1305",
     "aes-gcm",
+    "argon2id",
     "web-crypto"
   ],
   "engines": {
     "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.2.0",
+    "@noble/hashes": "^2.2.0"
   }
 }

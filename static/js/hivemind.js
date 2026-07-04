@@ -411,22 +411,53 @@ PasswordHandShake.prototype.deriveSecret = async function () {
 // ─────────────────────────────────────────────────────────────────────────────
 // Protocol v3 — Noise handshake (HIVEMIND-CRYPTO-1 §3.4)
 //
-// Implements the Noise Protocol Framework (revision 34) on top of native Web
-// Crypto only (X25519 + AES-256-GCM + SHA-256 + HMAC).  Web Crypto has no
-// ChaCha20-Poly1305, so this client offers the spec's optional AES-GCM suite
-// (HIVEMIND-CRYPTO-1 §3.4.1):
+// Implements the Noise Protocol Framework (revision 34). X25519, SHA-256, HMAC
+// and AES-256-GCM come from native Web Crypto; ChaCha20-Poly1305 (the DEFAULT
+// AEAD) and argon2id (the DEFAULT PSK derivation) come from @noble. Full cipher
+// parity with hivemind-core — both suites (HIVEMIND-CRYPTO-1 §3.4.1) across both
+// patterns:
 //
-//   Noise_XXpsk2_25519_AESGCM_SHA256   (general case — MUST-support pattern)
-//   Noise_KKpsk0_25519_AESGCM_SHA256   (pre-provisioned static keys)
+//   Noise_XXpsk2_25519_ChaChaPoly_SHA256   (DEFAULT, general case)
+//   Noise_KKpsk0_25519_ChaChaPoly_SHA256   (DEFAULT, pre-provisioned keys)
+//   Noise_XXpsk2_25519_AESGCM_SHA256       (Web-Crypto-native fallback)
+//   Noise_KKpsk0_25519_AESGCM_SHA256       (Web-Crypto-native fallback)
 //
-// The suite is only used when the server advertises it; otherwise the client
-// falls back to the legacy (v0–v2) PasswordHandShake path above.
+// ChaChaPoly is preferred (matching the Python client's preference order); the
+// suite is negotiated from the server's advertised list. When no mutual suite
+// exists the client falls back to the legacy (v0–v2) PasswordHandShake path.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// @noble crypto — the primitives Web Crypto lacks: ChaCha20-Poly1305 (AEAD for
+// the DEFAULT Noise suite) and argon2id (the DEFAULT PSK derivation). Loaded via
+// require() in Node; in the browser a bundle must expose them on
+//   globalThis.HiveMindNoble = { chacha20poly1305, argon2id }
+// (see the readme "Browser build" note). Both are pure-JS, audited (@noble by
+// Paul Miller). When absent (a minimal browser deployment that skipped the
+// bundle) the client degrades to the Web-Crypto-only AES-GCM + PBKDF2 subset.
+let _chacha20poly1305 = null;
+let _argon2id = null;
+(function _loadNoble() {
+    const g = (typeof globalThis !== 'undefined' && globalThis.HiveMindNoble) || null;
+    if (g) { _chacha20poly1305 = g.chacha20poly1305 || null; _argon2id = g.argon2id || null; }
+    if ((!_chacha20poly1305 || !_argon2id) && typeof require === 'function') {
+        try {
+            if (!_chacha20poly1305) _chacha20poly1305 = require('@noble/ciphers/chacha.js').chacha20poly1305;
+            if (!_argon2id) _argon2id = require('@noble/hashes/argon2.js').argon2id;
+        } catch (_) { /* optional — see note above */ }
+    }
+})();
 
 const NOISE_PATTERN_XX = 'XXpsk2';
 const NOISE_PATTERN_KK = 'KKpsk0';
-// suites this client can run (Web Crypto has no ChaCha20-Poly1305)
-const NOISE_SUITES_JS = ['25519_AESGCM_SHA256'];
+const NOISE_SUITE_CHACHA = '25519_ChaChaPoly_SHA256'; // default (needs @noble/ciphers)
+const NOISE_SUITE_AESGCM = '25519_AESGCM_SHA256';     // Web-Crypto-native fallback
+
+// suites this client can run, in PREFERENCE order (matching the Python client:
+// ChaCha20-Poly1305 first, AES-GCM for Web-Crypto-only situations). ChaCha is
+// only offered when @noble/ciphers is available; AES-GCM is always available.
+const NOISE_SUITES_JS = (_chacha20poly1305
+    ? [NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM]
+    : [NOISE_SUITE_AESGCM]);
 
 // transport frame markers (first plaintext byte) — must match
 // hivemind_bus_client.noise._FRAME_JSON / _FRAME_BINARY
@@ -523,7 +554,8 @@ async function x25519(rawPriv, rawPub) {
 // strictly sequential, giving the v3 session replay resistance (§3.4.5).
 
 class NoiseCipherState {
-    constructor() {
+    constructor(suite) {
+        this.suite = suite || NOISE_SUITE_AESGCM;
         this.k = null;      // Uint8Array(32) or null (no key yet)
         this.n = 0n;        // 64-bit message counter
     }
@@ -537,41 +569,57 @@ class NoiseCipherState {
             throw new Error('Noise nonce exhausted');
         }
         const nonce = new Uint8Array(12);
-        new DataView(nonce.buffer).setBigUint64(4, this.n, false); // big-endian
+        // 4-byte zero prefix + 64-bit counter. Byte order differs per suite
+        // (Noise spec §12): AES-GCM big-endian, ChaCha20-Poly1305 little-endian.
+        const littleEndian = this.suite === NOISE_SUITE_CHACHA;
+        new DataView(nonce.buffer).setBigUint64(4, this.n, littleEndian);
         return nonce;
     }
 
     async encryptWithAd(ad, plaintext) {
         if (!this.hasKey()) return plaintext;
         const nonce = this._nonce();
-        const key = await crypto.subtle.importKey('raw', this.k, 'AES-GCM', false, ['encrypt']);
-        const params = { name: 'AES-GCM', iv: nonce, tagLength: 128 };
-        if (ad && ad.length) params.additionalData = ad;
-        const ct = await crypto.subtle.encrypt(params, key, plaintext);
+        const aad = ad && ad.length ? ad : undefined;
+        let ct;
+        if (this.suite === NOISE_SUITE_CHACHA) {
+            ct = _chacha20poly1305(this.k, nonce, aad).encrypt(plaintext); // ct || 16-byte tag
+        } else {
+            const key = await crypto.subtle.importKey('raw', this.k, 'AES-GCM', false, ['encrypt']);
+            const params = { name: 'AES-GCM', iv: nonce, tagLength: 128 };
+            if (aad) params.additionalData = aad;
+            ct = new Uint8Array(await crypto.subtle.encrypt(params, key, plaintext)); // ct || tag
+        }
         this.n += 1n;
-        return new Uint8Array(ct); // ciphertext || 16-byte tag
+        return ct;
     }
 
     async decryptWithAd(ad, ciphertext) {
         if (!this.hasKey()) return ciphertext;
         const nonce = this._nonce();
-        const key = await crypto.subtle.importKey('raw', this.k, 'AES-GCM', false, ['decrypt']);
-        const params = { name: 'AES-GCM', iv: nonce, tagLength: 128 };
-        if (ad && ad.length) params.additionalData = ad;
+        const aad = ad && ad.length ? ad : undefined;
         // throws on any AEAD failure — the counter is only advanced on success,
         // and a failed message MUST NOT be retried under another nonce (§3.4.5)
-        const pt = await crypto.subtle.decrypt(params, key, ciphertext);
+        let pt;
+        if (this.suite === NOISE_SUITE_CHACHA) {
+            pt = _chacha20poly1305(this.k, nonce, aad).decrypt(ciphertext);
+        } else {
+            const key = await crypto.subtle.importKey('raw', this.k, 'AES-GCM', false, ['decrypt']);
+            const params = { name: 'AES-GCM', iv: nonce, tagLength: 128 };
+            if (aad) params.additionalData = aad;
+            pt = new Uint8Array(await crypto.subtle.decrypt(params, key, ciphertext));
+        }
         this.n += 1n;
-        return new Uint8Array(pt);
+        return pt;
     }
 }
 
 // ── Noise SymmetricState ──────────────────────────────────────────────────────
 
 class NoiseSymmetricState {
-    // protocolName: Uint8Array
-    static async create(protocolName) {
+    // protocolName: Uint8Array ; suite: string (selects the AEAD)
+    static async create(protocolName, suite) {
         const st = new NoiseSymmetricState();
+        st.suite = suite || NOISE_SUITE_AESGCM;
         if (protocolName.length <= 32) {
             st.h = new Uint8Array(32);
             st.h.set(protocolName);
@@ -579,7 +627,7 @@ class NoiseSymmetricState {
             st.h = await sha256(protocolName);
         }
         st.ck = st.h.slice();
-        st.cipher = new NoiseCipherState();
+        st.cipher = new NoiseCipherState(st.suite);
         return st;
     }
 
@@ -614,8 +662,8 @@ class NoiseSymmetricState {
 
     async split() {
         const [k1, k2] = await noiseHkdf(this.ck, new Uint8Array(0), 2);
-        const c1 = new NoiseCipherState(); c1.initializeKey(k1);
-        const c2 = new NoiseCipherState(); c2.initializeKey(k2);
+        const c1 = new NoiseCipherState(this.suite); c1.initializeKey(k1);
+        const c2 = new NoiseCipherState(this.suite); c2.initializeKey(k2);
         return [c1, c2];
     }
 }
@@ -660,7 +708,7 @@ class NoiseHandshake {
         hs.re = null;                            // remote ephemeral
 
         hs.symmetric = await NoiseSymmetricState.create(
-            new TextEncoder().encode(hs.protocolName));
+            new TextEncoder().encode(hs.protocolName), hs.suite);
         await hs.symmetric.mixHash(opts.prologue || new Uint8Array(0));
 
         // pre-messages (KK): initiator's static, then responder's static
@@ -798,7 +846,9 @@ class NoiseTransport {
 // pick (pattern, suite) from the server's advertised lists; KKpsk0 preferred
 // when the remote static key is pinned/provisioned; null when no mutual option
 function selectNoiseOptions(serverPatterns, serverSuites, pinnedRemoteKey) {
-    const suite = (serverSuites || []).find(s => NOISE_SUITES_JS.indexOf(s) !== -1);
+    // walk OUR preference-ordered list (ChaCha first) so the default suite wins
+    // whenever both peers support it, regardless of the server's list order
+    const suite = NOISE_SUITES_JS.find(s => (serverSuites || []).indexOf(s) !== -1);
     if (!suite) return null;
     if (pinnedRemoteKey && (serverPatterns || []).indexOf(NOISE_PATTERN_KK) !== -1) {
         return { pattern: NOISE_PATTERN_KK, suite };
@@ -818,6 +868,23 @@ function buildNoisePrologue(helloPayload, handshakePayload, protocolName) {
     return concatBytes(enc.encode(canonicalJson(helloPayload || {})),
                        enc.encode(canonicalJson(handshakePayload || {})),
                        enc.encode(protocolName));
+}
+
+// argon2id PSK derivation — the server's DEFAULT (HIVEMIND-CRYPTO-1 §3.4.4),
+// byte-identical to poorman_handshake.noise.derive_psk:
+//   PSK = argon2id(password, salt=SHA-256(node_id),
+//                  t=3, m=64 MiB, p=1, hashLen=32, version 0x13, type=id)
+// This lets a password-configured client derive the SAME PSK as core with NO
+// server-side configuration. Requires @noble/hashes (bundled in Node; in the
+// browser expose it via globalThis.HiveMindNoble — see the readme).
+async function derivePskArgon2(password, nodeId) {
+    if (!_argon2id) {
+        throw new Error('argon2id unavailable: @noble/hashes not loaded ' +
+            '(browser bundle must expose globalThis.HiveMindNoble.argon2id)');
+    }
+    const salt = await sha256(new TextEncoder().encode(nodeId || ''));
+    return _argon2id(new TextEncoder().encode(password), salt,
+        { t: 3, m: 64 * 1024, p: 1, dkLen: 32 });
 }
 
 // PBKDF2 PSK derivation for constrained peers (HIVEMIND-CRYPTO-1 §3.4.4):
@@ -1103,28 +1170,32 @@ JarbasHiveMind.prototype._resolveNoisePsk = async function (payload) {
     var noiseParams = payload.noise;
     if (!noiseParams || typeof noiseParams !== 'object') return null;
     if (!selectNoiseOptions(noiseParams.patterns, noiseParams.suites, this._serverNoiseKey)) {
-        // no mutual pattern/suite (e.g. server only offers ChaChaPoly, which
-        // Web Crypto cannot provide) -> legacy handshake
+        // no mutual pattern/suite -> legacy handshake
         console.warn('HiveMind: no mutual Noise pattern/suite, using legacy handshake');
         return null;
     }
     // 1. provisioned PSK — always interoperates (equals the server's
-    //    argon2id(password, SHA-256(node_id)), computed once on a capable host)
+    //    argon2id(password, SHA-256(node_id)))
     if (this._psk) return this._psk;
-    // 2. password via PBKDF2 — only when the server advertises PBKDF2 as its
-    //    PSK KDF (§3.4.4); the KDF params are part of the prologue-bound payload
     var kdf = noiseParams.kdf || {};
+    // 2. password via PBKDF2 — only when the server explicitly advertises PBKDF2
+    //    as its PSK KDF (§3.4.4); the KDF params are part of the prologue-bound
+    //    payload, so this is downgrade-protected
     if (this._password && (kdf.name === 'PBKDF2' || kdf.name === 'PBKDF2-HMAC-SHA256')) {
         return await derivePskPBKDF2(this._password, this._serverNodeId || '', kdf.iterations);
     }
-    // 3. argon2id server (the default) and no provisioned PSK: Web Crypto has
-    //    no argon2id, so a password-only JS client cannot derive the PSK.
+    // 3. password via argon2id — the server DEFAULT; derives the SAME PSK as
+    //    core with no server-side configuration (needs @noble/hashes)
+    if (this._password && _argon2id) {
+        return await derivePskArgon2(this._password, this._serverNodeId || '');
+    }
+    // 4. no PSK and argon2id unavailable (minimal browser bundle without @noble)
     console.error(
-        'HiveMind: server offers protocol v3 (Noise) but no PSK is available. ' +
-        'Web Crypto has no argon2id, so pass connect(..., { psk }) with the ' +
-        '32-byte PSK provisioned from a capable host — ' +
-        'argon2id(password, SHA-256(node_id)) — or configure the server to ' +
-        'advertise PBKDF2 as the PSK KDF. Falling back to the legacy handshake.');
+        'HiveMind: server offers protocol v3 (Noise) but no PSK can be derived. ' +
+        'argon2id is unavailable — load @noble/hashes (expose ' +
+        'globalThis.HiveMindNoble.argon2id in the browser) or pass ' +
+        'connect(..., { psk }) with a 32-byte provisioned PSK. ' +
+        'Falling back to the legacy handshake.');
     return null;
 };
 
@@ -1417,8 +1488,10 @@ if (typeof module !== 'undefined') {
         BIN_TYPES, MSG_TYPE_TO_INT, INT_TO_MSG_TYPE,
         // protocol v3 (Noise)
         NoiseHandshake, NoiseTransport, NoiseCipherState, NoiseSymmetricState,
-        selectNoiseOptions, buildNoisePrologue, canonicalJson, derivePskPBKDF2,
+        selectNoiseOptions, buildNoisePrologue, canonicalJson,
+        derivePskPBKDF2, derivePskArgon2,
         noiseHkdf, x25519, x25519PublicFromPrivate,
-        NOISE_PATTERN_XX, NOISE_PATTERN_KK, NOISE_SUITES_JS
+        NOISE_PATTERN_XX, NOISE_PATTERN_KK,
+        NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM, NOISE_SUITES_JS
     };
 }

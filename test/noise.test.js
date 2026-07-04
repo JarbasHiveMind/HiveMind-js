@@ -48,7 +48,8 @@ globalThis.WebSocket = MockWebSocket;
 const {
     JarbasHiveMind, States,
     NoiseHandshake, NoiseTransport,
-    selectNoiseOptions, buildNoisePrologue, canonicalJson, derivePskPBKDF2
+    selectNoiseOptions, buildNoisePrologue, canonicalJson,
+    derivePskPBKDF2, derivePskArgon2, NOISE_SUITES_JS
 } = require('../static/js/hivemind.js');
 
 const vectors = JSON.parse(
@@ -86,7 +87,7 @@ describe('Web Crypto capability', () => {
 async function makeInitiator(v, pattern) {
     return await NoiseHandshake.create({
         pattern,
-        suite: '25519_AESGCM_SHA256',
+        suite: v.suite,
         psk: fromHex(v.psk_hex),
         prologue: fromHex(v.prologue_hex),
         staticPriv: fromHex(v.initiator_static_hex),
@@ -110,8 +111,9 @@ describe('Prologue construction (canonical JSON interop)', () => {
     });
 });
 
-describe('Noise_XXpsk2_25519_AESGCM_SHA256 interop (Python responder fixtures)', () => {
-    const v = vectors.xxpsk2;
+for (const [suiteLabel, vkey] of [['ChaChaPoly', 'xxpsk2_chacha'], ['AESGCM', 'xxpsk2_aesgcm']])
+describe('Noise_XXpsk2_' + suiteLabel + ' interop (Python responder fixtures)', () => {
+    const v = vectors[vkey];
 
     test('full handshake reproduces the reference byte-for-byte', async () => {
         const hs = await makeInitiator(v, 'XXpsk2');
@@ -178,7 +180,7 @@ describe('Noise_XXpsk2_25519_AESGCM_SHA256 interop (Python responder fixtures)',
             Object.assign({}, v.handshake_payload, { max_protocol_version: 2 }),
             v.protocol_name);
         const hs = await NoiseHandshake.create({
-            pattern: 'XXpsk2', suite: '25519_AESGCM_SHA256',
+            pattern: 'XXpsk2', suite: v.suite,
             psk: fromHex(v.psk_hex), prologue: tampered,
             staticPriv: fromHex(v.initiator_static_hex),
             ephemeralPriv: fromHex(v.initiator_ephemeral_hex)
@@ -188,8 +190,9 @@ describe('Noise_XXpsk2_25519_AESGCM_SHA256 interop (Python responder fixtures)',
     });
 });
 
-describe('Noise_KKpsk0_25519_AESGCM_SHA256 interop (pre-provisioned static keys)', () => {
-    const v = vectors.kkpsk0;
+for (const [suiteLabel, vkey] of [['ChaChaPoly', 'kkpsk0_chacha'], ['AESGCM', 'kkpsk0_aesgcm']])
+describe('Noise_KKpsk0_' + suiteLabel + ' interop (pre-provisioned static keys)', () => {
+    const v = vectors[vkey];
 
     test('two-message handshake + transport round-trip match the reference', async () => {
         const hs = await makeInitiator(v, 'KKpsk0');
@@ -211,13 +214,19 @@ describe('Noise_KKpsk0_25519_AESGCM_SHA256 interop (pre-provisioned static keys)
 
     test('KKpsk0 requires the remote static public key', async () => {
         await assert.rejects(() => NoiseHandshake.create({
-            pattern: 'KKpsk0', suite: '25519_AESGCM_SHA256',
+            pattern: 'KKpsk0', suite: v.suite,
             psk: fromHex(v.psk_hex), prologue: new Uint8Array(0)
         }), /remote static/);
     });
 });
 
-describe('PSK derivation (PBKDF2 constrained-peer path)', () => {
+describe('PSK derivation', () => {
+    test('derivePskArgon2 matches poorman derive_psk (argon2id, DEFAULT) byte-for-byte', async () => {
+        const v = vectors.argon2id_psk;
+        const psk = await derivePskArgon2(v.password, v.node_id);
+        assert.equal(toHex(psk), v.expected_psk_hex);
+        assert.equal(psk.length, 32);
+    });
     test('derivePskPBKDF2 matches PBKDF2-HMAC-SHA256(password, SHA-256(node_id))', async () => {
         const v = vectors.pbkdf2_psk;
         const psk = await derivePskPBKDF2(v.password, v.node_id, v.iterations);
@@ -227,18 +236,27 @@ describe('PSK derivation (PBKDF2 constrained-peer path)', () => {
 });
 
 describe('Negotiation (selectNoiseOptions)', () => {
-    test('selects AESGCM suite and XXpsk2 when offered', () => {
+    test('prefers the DEFAULT ChaChaPoly suite when both are offered', () => {
         const sel = selectNoiseOptions(['XXpsk2'],
-            ['25519_ChaChaPoly_SHA256', '25519_AESGCM_SHA256'], null);
+            ['25519_AESGCM_SHA256', '25519_ChaChaPoly_SHA256'], null);
+        assert.deepEqual(sel, { pattern: 'XXpsk2', suite: '25519_ChaChaPoly_SHA256' });
+    });
+    test('falls back to AESGCM when the server offers only AESGCM', () => {
+        const sel = selectNoiseOptions(['XXpsk2'], ['25519_AESGCM_SHA256'], null);
         assert.deepEqual(sel, { pattern: 'XXpsk2', suite: '25519_AESGCM_SHA256' });
+    });
+    test('selects ChaChaPoly when the server offers only ChaChaPoly', () => {
+        const sel = selectNoiseOptions(['XXpsk2'], ['25519_ChaChaPoly_SHA256'], null);
+        assert.deepEqual(sel, { pattern: 'XXpsk2', suite: '25519_ChaChaPoly_SHA256' });
     });
     test('prefers KKpsk0 when a remote static key is pinned and offered', () => {
         const sel = selectNoiseOptions(['KKpsk0', 'XXpsk2'],
-            ['25519_AESGCM_SHA256'], 'aa'.repeat(32));
+            ['25519_ChaChaPoly_SHA256'], 'aa'.repeat(32));
         assert.equal(sel.pattern, 'KKpsk0');
+        assert.equal(sel.suite, '25519_ChaChaPoly_SHA256');
     });
-    test('no mutual suite (ChaChaPoly only — no Web Crypto support) -> null', () => {
-        assert.equal(selectNoiseOptions(['XXpsk2'], ['25519_ChaChaPoly_SHA256'], null), null);
+    test('no mutual suite -> null', () => {
+        assert.equal(selectNoiseOptions(['XXpsk2'], ['some_unknown_suite'], null), null);
     });
 });
 
@@ -332,25 +350,66 @@ describe('JarbasHiveMind protocol v3 client flow', () => {
         assert.equal(msg.payload.noise, undefined);
     });
 
-    test('argon2id server + no provisioned PSK -> clear error, legacy fallback', async () => {
+    test('argon2id server (DEFAULT) + password only -> derives PSK, starts v3', async () => {
+        const av = vectors.argon2id_psk;
         const hm = new JarbasHiveMind();
-        // password only, no psk: cannot derive argon2id in Web Crypto
-        hm.connect('localhost', 5678, 'user', 'key', 'some-password');
+        // password only, no provisioned psk: argon2id is now available (@noble)
+        hm.connect('localhost', 5678, 'user', 'key', av.password);
         const ws = _lastMockWs;
         ws.triggerOpen();
-        const errors = [];
-        const origError = console.error;
-        console.error = (m) => { errors.push(String(m)); };
-        try {
-            await ws.inject({ msg_type: 'hello', payload: v.hello_payload });
-            await ws.inject({ msg_type: 'shake', payload: v.handshake_payload });
-        } finally {
-            console.error = origError;
-        }
+        await ws.inject({ msg_type: 'hello', payload: { node_id: av.node_id } });
+        await ws.inject({
+            msg_type: 'shake',
+            payload: {
+                handshake: true, password: true,
+                min_protocol_version: 2, max_protocol_version: 3,
+                encodings: ['JSON-HEX'], ciphers: ['AES-GCM'],
+                // server default: no explicit kdf -> argon2id assumed
+                noise: { patterns: ['XXpsk2'],
+                         suites: ['25519_ChaChaPoly_SHA256', '25519_AESGCM_SHA256'] }
+            }
+        });
         const msg = JSON.parse(ws.sent[ws.sent.length - 1]);
-        assert.ok(typeof msg.payload.envelope === 'string', 'must fall back to the legacy handshake');
-        assert.ok(errors.some(e => /argon2id/.test(e) && /psk/i.test(e)),
-            'operator guidance about PSK provisioning must be surfaced');
+        assert.equal(msg.msg_type, 'shake');
+        assert.equal(msg.payload.noise.pattern, 'XXpsk2', 'v3 handshake must start');
+        assert.equal(msg.payload.noise.suite, '25519_ChaChaPoly_SHA256',
+            'the DEFAULT ChaChaPoly suite must be selected');
+        assert.equal(toHex(hm._noiseHandshake.psk), av.expected_psk_hex,
+            'PSK must equal argon2id(password, SHA-256(node_id)) — no server config');
+    });
+
+    test('ChaChaPoly (DEFAULT suite) full v3 client handshake, byte-for-byte', async () => {
+        const cv = vectors.xxpsk2_chacha;
+        const hm = new JarbasHiveMind();
+        hm.connect('localhost', 5678, 'user', 'access-key', 'unused-password', {
+            psk: cv.psk_hex,
+            noiseStaticKey: cv.initiator_static_hex,
+            _noiseEphemeralKey: cv.initiator_ephemeral_hex
+        });
+        const ws = _lastMockWs;
+        ws.triggerOpen();
+        let connected = false;
+        hm.onHiveConnected = () => { connected = true; };
+
+        await ws.inject({ msg_type: 'hello', payload: cv.hello_payload });
+        await ws.inject({ msg_type: 'shake', payload: cv.handshake_payload });
+
+        const shake1 = JSON.parse(ws.sent[ws.sent.length - 1]);
+        assert.equal(shake1.payload.noise.suite, '25519_ChaChaPoly_SHA256');
+        assert.equal(shake1.payload.noise.msg, cv.msg1_hex, 'ChaCha msg1 must match');
+
+        await ws.inject({ msg_type: 'shake', payload: { noise: { msg: cv.msg2_hex } } });
+        const shake3 = JSON.parse(ws.sent[ws.sent.length - 2]);
+        assert.equal(shake3.payload.noise.msg, cv.msg3_hex, 'ChaCha msg3 must match');
+        assert.equal(hm._state, States.READY);
+        assert.ok(connected);
+
+        let received = null;
+        hm.onMycroftMessage = (m) => { received = m; };
+        const frame = fromHex(cv.server_transport_frame_hex);
+        await ws.inject(frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength));
+        assert.ok(received, 'ChaCha transport frame must decrypt + dispatch');
+        assert.equal(received.data.utterance, 'hello from python');
     });
 
     test('password + server-advertised PBKDF2 KDF derives the PSK', async () => {
