@@ -9,12 +9,16 @@ fixtures.  The JS implementation, acting as the **initiator** (node role) with
 the same fixed keys, must reproduce every byte — proving byte-level interop
 with a Python/noiseprotocol server.
 
-The suite is ``25519_AESGCM_SHA256``: the JS client is built on native Web
-Crypto only, which provides AES-256-GCM but not ChaCha20-Poly1305
-(HIVEMIND-CRYPTO-1 §3.4.1 registers the AES-GCM suite as an optional
-alternative).
+Both registered cipher suites are covered (HIVEMIND-CRYPTO-1 §3.4.1):
 
-Run with a venv that has ``noiseprotocol`` installed:
+- ``25519_ChaChaPoly_SHA256`` — the mandatory/DEFAULT suite. HiveMind-js runs
+  ChaCha20-Poly1305 via ``@noble/ciphers``.
+- ``25519_AESGCM_SHA256`` — the Web-Crypto-native fallback suite.
+
+The PSK-derivation fixtures cover both the DEFAULT argon2id (matching
+``poorman_handshake.noise.derive_psk`` exactly) and the PBKDF2 fallback.
+
+Run with a venv that has ``poorman_handshake`` + ``noiseprotocol`` installed:
   ~/.venvs/hivemind-v3/bin/python test/generate_noise_vectors.py
 """
 import hashlib
@@ -22,6 +26,7 @@ import json
 import os
 
 from noise.connection import Keypair, NoiseConnection
+from poorman_handshake.noise import derive_psk
 
 # ── Fixed inputs (deterministic) ──────────────────────────────────────────────
 
@@ -38,6 +43,10 @@ RESPONDER_STATIC = bytes.fromhex(
     "3333333333333333333333333333333333333333333333333333333333333333")
 RESPONDER_EPHEMERAL = bytes.fromhex(
     "4444444444444444444444444444444444444444444444444444444444444444")
+
+# both registered cipher suites (HIVEMIND-CRYPTO-1 §3.4.1)
+SUITE_CHACHA = "25519_ChaChaPoly_SHA256"
+SUITE_AESGCM = "25519_AESGCM_SHA256"
 
 
 def pubkey_of(private_bytes: bytes) -> bytes:
@@ -60,19 +69,22 @@ HELLO_PAYLOAD = {
     "peer": "tcp4:127.0.0.1:12345",
     "node_id": "tcp4:0.0.0.0:5678"
 }
-HANDSHAKE_PAYLOAD = {
-    "handshake": True,
-    "min_protocol_version": 2,
-    "max_protocol_version": 3,
-    "binarize": False,
-    "preshared_key": False,
-    "password": True,
-    "crypto_required": True,
-    "encodings": ["JSON-HEX"],
-    "ciphers": ["AES-GCM"],
-    "noise": {"patterns": ["XXpsk2"],
-              "suites": ["25519_AESGCM_SHA256"]}
-}
+
+
+def handshake_payload(suites) -> dict:
+    return {
+        "handshake": True,
+        "min_protocol_version": 2,
+        "max_protocol_version": 3,
+        "binarize": False,
+        "preshared_key": False,
+        "password": True,
+        "crypto_required": True,
+        "encodings": ["JSON-HEX"],
+        "ciphers": ["AES-GCM"],
+        "noise": {"patterns": ["XXpsk2"], "suites": list(suites)},
+    }
+
 
 # Noise payloads carried inside the handshake messages
 MSG1_PAYLOAD = canonical_json({"binarize": False, "encodings": ["JSON-HEX"]})
@@ -104,15 +116,16 @@ def make_connection(name: bytes, initiator: bool, psk: bytes, prologue: bytes,
     return c
 
 
-def build_prologue(protocol_name: str) -> bytes:
+def build_prologue(protocol_name: str, hs_payload: dict) -> bytes:
     """Per HIVEMIND-CRYPTO-1 §3.4.3 / hivemind_bus_client.noise.build_prologue."""
-    return (canonical_json(HELLO_PAYLOAD) + canonical_json(HANDSHAKE_PAYLOAD)
+    return (canonical_json(HELLO_PAYLOAD) + canonical_json(hs_payload)
             + protocol_name.encode("utf-8"))
 
 
-def xx_vector() -> dict:
-    name = "Noise_XXpsk2_25519_AESGCM_SHA256"
-    prologue = build_prologue(name)
+def xx_vector(suite: str) -> dict:
+    name = f"Noise_XXpsk2_{suite}"
+    hs_payload = handshake_payload([suite])
+    prologue = build_prologue(name, hs_payload)
     init = make_connection(name.encode(), True, PSK, prologue,
                            INITIATOR_STATIC, INITIATOR_EPHEMERAL)
     resp = make_connection(name.encode(), False, PSK, prologue,
@@ -128,7 +141,6 @@ def xx_vector() -> dict:
 
     # transport messages (counters start at 0 in each direction)
     server_frame = resp.encrypt(b"\x00" + SERVER_BUS_JSON.encode("utf-8"))
-    expected_client_frame = resp_expected = None
     # what the initiator must produce for CLIENT_BUS_JSON at send-counter 0
     expected_client_frame = init.encrypt(b"\x00" + CLIENT_BUS_JSON.encode("utf-8"))
     assert resp.decrypt(expected_client_frame) == b"\x00" + CLIENT_BUS_JSON.encode("utf-8")
@@ -141,9 +153,10 @@ def xx_vector() -> dict:
     msg2_wrong_psk = bad_resp.write_message(MSG2_PAYLOAD)
 
     return {
+        "suite": suite,
         "protocol_name": name,
         "hello_payload": HELLO_PAYLOAD,
-        "handshake_payload": HANDSHAKE_PAYLOAD,
+        "handshake_payload": hs_payload,
         "prologue_hex": prologue.hex(),
         "psk_hex": PSK.hex(),
         "initiator_static_hex": INITIATOR_STATIC.hex(),
@@ -163,9 +176,10 @@ def xx_vector() -> dict:
     }
 
 
-def kk_vector() -> dict:
-    name = "Noise_KKpsk0_25519_AESGCM_SHA256"
-    prologue = build_prologue(name)
+def kk_vector(suite: str) -> dict:
+    name = f"Noise_KKpsk0_{suite}"
+    hs_payload = handshake_payload([suite])
+    prologue = build_prologue(name, hs_payload)
     init = make_connection(name.encode(), True, PSK, prologue,
                            INITIATOR_STATIC, INITIATOR_EPHEMERAL,
                            remote_static=pubkey_of(RESPONDER_STATIC))
@@ -183,6 +197,7 @@ def kk_vector() -> dict:
     assert resp.decrypt(expected_client_frame) == b"\x00" + CLIENT_BUS_JSON.encode("utf-8")
 
     return {
+        "suite": suite,
         "protocol_name": name,
         "prologue_hex": prologue.hex(),
         "psk_hex": PSK.hex(),
@@ -198,6 +213,24 @@ def kk_vector() -> dict:
         "server_transport_plaintext": SERVER_BUS_JSON,
         "client_transport_plaintext": CLIENT_BUS_JSON,
         "expected_client_transport_frame_hex": expected_client_frame.hex(),
+    }
+
+
+def argon2id_vector() -> dict:
+    """DEFAULT PSK derivation — byte-identical to poorman_handshake.noise.derive_psk:
+    argon2id(password, salt=SHA-256(node_id), t=3, m=64 MiB, p=1, len=32)."""
+    password = "test-password-123"
+    node_id = HELLO_PAYLOAD["node_id"]
+    psk = derive_psk(password, node_id=node_id)
+    return {
+        "password": password,
+        "node_id": node_id,
+        "salt_hex": hashlib.sha256(node_id.encode("utf-8")).hexdigest(),
+        "time_cost": 3,
+        "memory_cost_kib": 64 * 1024,
+        "parallelism": 1,
+        "hash_len": 32,
+        "expected_psk_hex": psk.hex(),
     }
 
 
@@ -219,9 +252,18 @@ def pbkdf2_vector() -> dict:
 
 def main():
     vectors = {
-        "xxpsk2": xx_vector(),
-        "kkpsk0": kk_vector(),
+        # DEFAULT ChaCha20-Poly1305 suite
+        "xxpsk2_chacha": xx_vector(SUITE_CHACHA),
+        "kkpsk0_chacha": kk_vector(SUITE_CHACHA),
+        # Web-Crypto-native AES-GCM suite
+        "xxpsk2_aesgcm": xx_vector(SUITE_AESGCM),
+        "kkpsk0_aesgcm": kk_vector(SUITE_AESGCM),
+        # PSK derivations
+        "argon2id_psk": argon2id_vector(),
         "pbkdf2_psk": pbkdf2_vector(),
+        # legacy aliases (AES-GCM) kept for any external consumers
+        "xxpsk2": xx_vector(SUITE_AESGCM),
+        "kkpsk0": kk_vector(SUITE_AESGCM),
     }
     out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "noise_vectors.json")

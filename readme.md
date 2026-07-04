@@ -4,7 +4,7 @@
 
 JavaScript client for HiveMind — Protocol V1. Runs in the browser and in Node.js 18+.
 
-No external dependencies. Uses the native [Web Crypto API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API) (`crypto.subtle`), available in all modern browsers and Node.js 18+.
+Uses the native [Web Crypto API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API) (`crypto.subtle`) for X25519, SHA-256, HMAC and AES-GCM, plus [`@noble/ciphers`](https://github.com/paulmillr/noble-ciphers) and [`@noble/hashes`](https://github.com/paulmillr/noble-hashes) (pure-JS, audited, no WASM) for the two primitives Web Crypto lacks: **ChaCha20-Poly1305** (the default protocol-v3 Noise AEAD) and **argon2id** (the default PSK derivation). This gives HiveMind-js **full cipher parity with hivemind-core** — every registered Noise suite and PSK derivation. Node.js 18+; protocol v3 needs Node.js 20+ (Web Crypto X25519).
 
 ## Install
 
@@ -12,7 +12,7 @@ No external dependencies. Uses the native [Web Crypto API](https://developer.moz
 npm install hivemind-js
 ```
 
-Or just drop [`static/js/hivemind.js`](static/js/hivemind.js) into a page with a `<script>` tag — there is nothing to build and no runtime dependency.
+In Node.js the `@noble` dependencies are resolved automatically. For the browser see [Browser build](#browser-build) below — `hivemind.js` itself is a plain script, and it expects the two `@noble` primitives to be exposed on `globalThis.HiveMindNoble` (a five-line bundle step). Without them the client still runs, but degrades to the Web-Crypto-only AES-GCM + PBKDF2 subset (it cannot negotiate the default ChaChaPoly suite or derive an argon2id PSK).
 
 ## Quick start (browser)
 
@@ -22,7 +22,8 @@ Or just drop [`static/js/hivemind.js`](static/js/hivemind.js) into a page with a
 <head>
     <meta charset="UTF-8">
     <title>HiveMind JS Demo</title>
-    <!-- No extra crypto libraries needed — Web Crypto is built into the browser -->
+    <!-- Web Crypto is built in; expose @noble on globalThis.HiveMindNoble
+         for the default ChaChaPoly suite + argon2id PSK — see "Browser build" -->
     <script src="static/js/hivemind.js"></script>
 </head>
 <body>
@@ -84,8 +85,10 @@ hivemind.onMycroftSpeak = (msg) => console.log('speak:', msg.data.utterance);
 hivemind.connect('127.0.0.1', 5678, 'HivemindNode', 'ivf1NQSkQNogWYyr', 'mypassword');
 ```
 
-`ws` is the only dependency Node needs, and only because Node lacks a built-in
-`WebSocket` global; the crypto and protocol code have no dependencies at all.
+Node needs `ws` only as a dev dependency (Node lacks a built-in `WebSocket`
+global). The runtime crypto dependencies are `@noble/ciphers` and
+`@noble/hashes` — small, audited, pure-JS — used only for ChaCha20-Poly1305 and
+argon2id; everything else uses native Web Crypto.
 
 ## API reference
 
@@ -108,7 +111,7 @@ is used; otherwise the legacy Protocol V1 handshake runs.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `psk` | `Uint8Array` or hex string | Provisioned 32-byte Noise PSK — equal to the server's `argon2id(password, SHA-256(node_id))`, computed once on a capable host |
+| `psk` | `Uint8Array` or hex string | Optional pre-provisioned 32-byte Noise PSK. Normally unnecessary — a `password` is stretched with argon2id on-device to the same value; provide `psk` only to skip derivation or when no password is configured |
 | `serverNoiseKey` | hex string | Pinned server static X25519 public key; enables `KKpsk0` and aborts on mismatch (TOFU pinning) |
 | `noiseStaticKey` | `Uint8Array` or hex string | This node's static X25519 private key — persist it to keep a stable node identity across connections |
 | `maxProtocolVersion` | number | Cap the negotiated protocol version (default `3`) |
@@ -177,31 +180,41 @@ mutual static-key authentication, forward secrecy, password authentication
 without an offline-attackable artifact on the wire, and transcript binding
 (any tampering with the negotiation aborts the handshake).
 
-Web Crypto has no ChaCha20-Poly1305, so this client implements the spec's
-optional AES-GCM suite — still with no external dependencies:
+This client supports **both** registered cipher suites (HIVEMIND-CRYPTO-1
+§3.4.1) across **both** patterns — full parity with hivemind-core:
 
-- `Noise_XXpsk2_25519_AESGCM_SHA256` — general case (static keys exchanged in
-  the handshake, TOFU-then-pin)
-- `Noise_KKpsk0_25519_AESGCM_SHA256` — pre-provisioned static keys (pass
-  `serverNoiseKey`)
+- `Noise_XXpsk2_25519_ChaChaPoly_SHA256` — **default**, general case (static
+  keys exchanged in the handshake, TOFU-then-pin)
+- `Noise_KKpsk0_25519_ChaChaPoly_SHA256` — **default**, pre-provisioned static
+  keys (pass `serverNoiseKey`)
+- `Noise_XXpsk2_25519_AESGCM_SHA256` / `Noise_KKpsk0_25519_AESGCM_SHA256` —
+  Web-Crypto-native AES-GCM variants
 
-The suite is only selected when the server offers it; a server that only
-offers ChaCha20-Poly1305 falls back to the legacy v0–v2 handshake.
+ChaCha20-Poly1305 (via `@noble/ciphers`) is **preferred**, matching the Python
+client's preference order; the suite is negotiated from the server's advertised
+list, with AES-GCM chosen only when the server offers AES-GCM but not
+ChaChaPoly. When no mutual suite exists the client falls back to the legacy
+v0–v2 handshake.
 
 After the handshake, **all** session traffic travels as Noise transport
 messages (binary WebSocket frames) under per-direction cipher states with
 strictly sequential 64-bit counter nonces — replayed, reordered or tampered
 messages fail authentication and terminate the session.
 
-### The PSK — provisioning vs password
+### The PSK — password (default) vs provisioning
 
 The shared site password enters the handshake as a 32-byte Noise PSK. The
-server derives it as `argon2id(password, SHA-256(node_id))` by default, and
-**Web Crypto has no argon2id**, so a browser/Node client is a *constrained*
-peer (HIVEMIND-CRYPTO-1 §3.4.4):
+server derives it as `argon2id(password, SHA-256(node_id))` by default, and this
+client derives the **same** value on-device with `@noble/hashes` argon2id (same
+parameters: `t=3, m=64 MiB, p=1, len=32, id, v0x13`). So a password-configured
+client **just works** against a stock hivemind-core, with no server-side
+configuration and no provisioning step (HIVEMIND-CRYPTO-1 §3.4.4). The derivation
+is byte-verified against `poorman_handshake.noise.derive_psk` in the test suite.
 
-- **Provisioned PSK (recommended):** compute the PSK once on a capable host
-  and pass it as `options.psk`. With the Python stack:
+Alternative PSK inputs, in priority order:
+
+- **Provisioned PSK:** pass `options.psk` (32-byte `Uint8Array` or hex) to skip
+  derivation. Compute it on any capable host — e.g. Python:
 
   ```python
   from poorman_handshake.noise import derive_psk
@@ -209,14 +222,36 @@ peer (HIVEMIND-CRYPTO-1 §3.4.4):
   print(psk.hex())  # -> options.psk
   ```
 
-- **Password via PBKDF2:** if the server advertises `PBKDF2` as its PSK KDF in
-  the handshake parameters, the client derives
-  `PBKDF2-HMAC-SHA256(password, SHA-256(node_id), >=100000, 32)` on-device.
+- **Password via PBKDF2:** if the server explicitly advertises `PBKDF2` as its
+  PSK KDF in the handshake parameters, the client derives
+  `PBKDF2-HMAC-SHA256(password, SHA-256(node_id), >=100000, 32)` instead.
 
-With an argon2id server and no provisioned PSK the client logs a clear
-operator error and falls back to the legacy handshake.
+Only in a minimal browser deployment that ships `hivemind.js` **without** the
+`@noble` bundle (no ChaChaPoly, no argon2id) does the client become a
+constrained peer: it then needs a provisioned `options.psk` or a PBKDF2-
+advertising server, and logs a clear operator error otherwise.
 
 Requires `X25519` support in Web Crypto: all modern browsers, Node.js 20+.
+
+### Browser build
+
+`static/js/hivemind.js` is a plain script with no build step of its own, but the
+default ChaChaPoly suite and argon2id PSK need the two `@noble` primitives
+present as `globalThis.HiveMindNoble`. Expose them with a tiny ESM shim (both
+libraries are ESM, browser-friendly, and need no bundler):
+
+```html
+<script type="module">
+  import { chacha20poly1305 } from 'https://esm.sh/@noble/ciphers@2/chacha.js';
+  import { argon2id } from 'https://esm.sh/@noble/hashes@2/argon2.js';
+  globalThis.HiveMindNoble = { chacha20poly1305, argon2id };
+</script>
+<script src="static/js/hivemind.js"></script>
+```
+
+Or bundle the same three lines with your app (esbuild/rollup/vite) and drop the
+CDN import. If `globalThis.HiveMindNoble` is absent the client still loads and
+runs the Web-Crypto-only subset.
 
 ## Protocol V1 overview
 
@@ -247,7 +282,7 @@ node --test test/*.test.js
 npm test
 ```
 
-Test suite (~40 tests across 4 files):
+Test suite (72 tests across 5 files):
 
 | File | What it covers |
 |------|----------------|
@@ -255,7 +290,7 @@ Test suite (~40 tests across 4 files):
 | `test/encryption.test.js` | AES-GCM encrypt/decrypt, wire format, Python-vector round-trip |
 | `test/handshake.test.js` | Full connection state machine with a `MockWebSocket` |
 | `test/binary.test.js` | Bitstring codec, binary encryption, binarize handshake negotiation, binary send/receive |
-| `test/noise.test.js` | Protocol v3 Noise handshake: byte-level interop against Python `noiseprotocol` responder fixtures (XXpsk2 + KKpsk0), wrong-PSK/tampered-prologue failure, transport replay rejection, PBKDF2 PSK, client negotiation + v0-v2 fallback |
+| `test/noise.test.js` | Protocol v3 Noise handshake: byte-level interop against Python `poorman_handshake`/`noiseprotocol` responder fixtures for **both suites** (ChaChaPoly + AES-GCM) across **both patterns** (XXpsk2 + KKpsk0), wrong-PSK/tampered-prologue failure, transport replay rejection, **argon2id** + PBKDF2 PSK derivation (byte-verified vs `derive_psk`), client negotiation (ChaChaPoly preferred) + v0-v2 fallback |
 
 To regenerate the cross-language test vectors, run `test/generate_vectors.py` in a
 Python environment that has `hivemind-bus-client` and `poorman_handshake` installed.
@@ -267,12 +302,13 @@ python3 test/generate_vectors.py
 ```
 
 The protocol v3 (Noise) vectors are generated separately by
-`test/generate_noise_vectors.py`, which drives the Python `noiseprotocol`
-library (the engine `poorman_handshake.noise` wraps) as the server-role
-responder with fixed keys and records every handshake and transport byte:
+`test/generate_noise_vectors.py`, which drives the Python reference stack
+(`poorman_handshake.noise` + the `noiseprotocol` engine it wraps) as the
+server-role responder with fixed keys, for both cipher suites, and records
+every handshake and transport byte plus the argon2id/PBKDF2 PSK values:
 
 ```bash
-python3 test/generate_noise_vectors.py   # needs: pip install noiseprotocol
+python3 test/generate_noise_vectors.py   # needs: pip install poorman-handshake noiseprotocol
 ```
 
 ### Live end-to-end test
