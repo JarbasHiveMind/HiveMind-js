@@ -409,6 +409,435 @@ PasswordHandShake.prototype.deriveSecret = async function () {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Protocol v3 — Noise handshake (HIVEMIND-CRYPTO-1 §3.4)
+//
+// Implements the Noise Protocol Framework (revision 34) on top of native Web
+// Crypto only (X25519 + AES-256-GCM + SHA-256 + HMAC).  Web Crypto has no
+// ChaCha20-Poly1305, so this client offers the spec's optional AES-GCM suite
+// (HIVEMIND-CRYPTO-1 §3.4.1):
+//
+//   Noise_XXpsk2_25519_AESGCM_SHA256   (general case — MUST-support pattern)
+//   Noise_KKpsk0_25519_AESGCM_SHA256   (pre-provisioned static keys)
+//
+// The suite is only used when the server advertises it; otherwise the client
+// falls back to the legacy (v0–v2) PasswordHandShake path above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const NOISE_PATTERN_XX = 'XXpsk2';
+const NOISE_PATTERN_KK = 'KKpsk0';
+// suites this client can run (Web Crypto has no ChaCha20-Poly1305)
+const NOISE_SUITES_JS = ['25519_AESGCM_SHA256'];
+
+// transport frame markers (first plaintext byte) — must match
+// hivemind_bus_client.noise._FRAME_JSON / _FRAME_BINARY
+const NOISE_FRAME_JSON = 0x00;
+const NOISE_FRAME_BINARY = 0x01;
+
+function concatBytes() {
+    let total = 0;
+    for (const a of arguments) total += a.length;
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const a of arguments) { out.set(a, off); off += a.length; }
+    return out;
+}
+
+// canonicalJson — must produce byte-identical output to Python's
+//   json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+// (used for Noise prologue binding and handshake payloads; both peers must
+// serialize the negotiation payloads identically)
+function canonicalJson(value) {
+    if (value === null || typeof value !== 'object') {
+        return JSON.stringify(value);
+    }
+    if (Array.isArray(value)) {
+        return '[' + value.map(canonicalJson).join(',') + ']';
+    }
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map(k => JSON.stringify(k) + ':' + canonicalJson(value[k])).join(',') + '}';
+}
+
+async function sha256(bytes) {
+    return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+}
+
+async function hmacSha256(keyBytes, dataBytes) {
+    const key = await crypto.subtle.importKey(
+        'raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    return new Uint8Array(await crypto.subtle.sign('HMAC', key, dataBytes));
+}
+
+// Noise HKDF (Noise spec §4.3): chained HMACs, 2 or 3 outputs of 32 bytes
+async function noiseHkdf(chainingKey, inputKeyMaterial, numOutputs) {
+    const tempKey = await hmacSha256(chainingKey, inputKeyMaterial);
+    const out1 = await hmacSha256(tempKey, new Uint8Array([0x01]));
+    const out2 = await hmacSha256(tempKey, concatBytes(out1, new Uint8Array([0x02])));
+    if (numOutputs === 2) return [out1, out2];
+    const out3 = await hmacSha256(tempKey, concatBytes(out2, new Uint8Array([0x03])));
+    return [out1, out2, out3];
+}
+
+// ── X25519 via Web Crypto ─────────────────────────────────────────────────────
+// Private keys are handled as 32 raw bytes and wrapped in a fixed PKCS#8
+// prefix for import (Web Crypto only imports raw *public* X25519 keys).
+
+const X25519_PKCS8_PREFIX = fromHex('302e020100300506032b656e04220420');
+
+function x25519GeneratePrivate() {
+    return crypto.getRandomValues(new Uint8Array(32));
+}
+
+async function _x25519ImportPrivate(rawPriv, extractable) {
+    return await crypto.subtle.importKey(
+        'pkcs8', concatBytes(X25519_PKCS8_PREFIX, rawPriv),
+        { name: 'X25519' }, extractable, ['deriveBits']);
+}
+
+function _b64urlToBytes(s) {
+    s = s.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    const bin = atob(s);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+}
+
+// public key (32 raw bytes) for a raw private key
+async function x25519PublicFromPrivate(rawPriv) {
+    const key = await _x25519ImportPrivate(rawPriv, true);
+    const jwk = await crypto.subtle.exportKey('jwk', key);
+    return _b64urlToBytes(jwk.x);
+}
+
+// X25519 Diffie-Hellman: raw private (32B) x raw public (32B) -> 32B shared
+async function x25519(rawPriv, rawPub) {
+    const priv = await _x25519ImportPrivate(rawPriv, false);
+    const pub = await crypto.subtle.importKey('raw', rawPub, { name: 'X25519' }, false, []);
+    const shared = await crypto.subtle.deriveBits({ name: 'X25519', public: pub }, priv, 256);
+    return new Uint8Array(shared);
+}
+
+// ── Noise CipherState (AESGCM) ────────────────────────────────────────────────
+// Nonce per the Noise spec's AESGCM rules: 12 bytes = 4 zero bytes followed by
+// the 64-bit big-endian message counter.  Nonces are implicit (never sent) and
+// strictly sequential, giving the v3 session replay resistance (§3.4.5).
+
+class NoiseCipherState {
+    constructor() {
+        this.k = null;      // Uint8Array(32) or null (no key yet)
+        this.n = 0n;        // 64-bit message counter
+    }
+
+    initializeKey(k) { this.k = k; this.n = 0n; }
+    hasKey() { return this.k !== null; }
+
+    _nonce() {
+        if (this.n >= 0xFFFFFFFFFFFFFFFFn) {
+            // Noise reserved maximum — MUST rekey or reconnect before this
+            throw new Error('Noise nonce exhausted');
+        }
+        const nonce = new Uint8Array(12);
+        new DataView(nonce.buffer).setBigUint64(4, this.n, false); // big-endian
+        return nonce;
+    }
+
+    async encryptWithAd(ad, plaintext) {
+        if (!this.hasKey()) return plaintext;
+        const nonce = this._nonce();
+        const key = await crypto.subtle.importKey('raw', this.k, 'AES-GCM', false, ['encrypt']);
+        const params = { name: 'AES-GCM', iv: nonce, tagLength: 128 };
+        if (ad && ad.length) params.additionalData = ad;
+        const ct = await crypto.subtle.encrypt(params, key, plaintext);
+        this.n += 1n;
+        return new Uint8Array(ct); // ciphertext || 16-byte tag
+    }
+
+    async decryptWithAd(ad, ciphertext) {
+        if (!this.hasKey()) return ciphertext;
+        const nonce = this._nonce();
+        const key = await crypto.subtle.importKey('raw', this.k, 'AES-GCM', false, ['decrypt']);
+        const params = { name: 'AES-GCM', iv: nonce, tagLength: 128 };
+        if (ad && ad.length) params.additionalData = ad;
+        // throws on any AEAD failure — the counter is only advanced on success,
+        // and a failed message MUST NOT be retried under another nonce (§3.4.5)
+        const pt = await crypto.subtle.decrypt(params, key, ciphertext);
+        this.n += 1n;
+        return new Uint8Array(pt);
+    }
+}
+
+// ── Noise SymmetricState ──────────────────────────────────────────────────────
+
+class NoiseSymmetricState {
+    // protocolName: Uint8Array
+    static async create(protocolName) {
+        const st = new NoiseSymmetricState();
+        if (protocolName.length <= 32) {
+            st.h = new Uint8Array(32);
+            st.h.set(protocolName);
+        } else {
+            st.h = await sha256(protocolName);
+        }
+        st.ck = st.h.slice();
+        st.cipher = new NoiseCipherState();
+        return st;
+    }
+
+    async mixHash(data) {
+        this.h = await sha256(concatBytes(this.h, data));
+    }
+
+    async mixKey(ikm) {
+        const [ck, tempK] = await noiseHkdf(this.ck, ikm, 2);
+        this.ck = ck;
+        this.cipher.initializeKey(tempK);
+    }
+
+    async mixKeyAndHash(ikm) {
+        const [ck, tempH, tempK] = await noiseHkdf(this.ck, ikm, 3);
+        this.ck = ck;
+        await this.mixHash(tempH);
+        this.cipher.initializeKey(tempK);
+    }
+
+    async encryptAndHash(plaintext) {
+        const ct = await this.cipher.encryptWithAd(this.h, plaintext);
+        await this.mixHash(ct);
+        return ct;
+    }
+
+    async decryptAndHash(ciphertext) {
+        const pt = await this.cipher.decryptWithAd(this.h, ciphertext);
+        await this.mixHash(ciphertext);
+        return pt;
+    }
+
+    async split() {
+        const [k1, k2] = await noiseHkdf(this.ck, new Uint8Array(0), 2);
+        const c1 = new NoiseCipherState(); c1.initializeKey(k1);
+        const c2 = new NoiseCipherState(); c2.initializeKey(k2);
+        return [c1, c2];
+    }
+}
+
+// ── Noise HandshakeState (initiator role only — the node is always the Noise
+//    initiator per HIVEMIND-CRYPTO-1 §3.4.3) ──────────────────────────────────
+
+// message token scripts (Noise spec pattern definitions, psk-modified)
+const NOISE_MESSAGE_PATTERNS = {
+    // -> e / <- e, ee, s, es, psk / -> s, se
+    XXpsk2: { preMessages: [], messages: [['e'], ['e', 'ee', 's', 'es', 'psk'], ['s', 'se']] },
+    // pre: -> s, <- s ;  -> psk, e, es, ss / <- e, ee, se
+    KKpsk0: { preMessages: ['s', 'rs'], messages: [['psk', 'e', 'es', 'ss'], ['e', 'ee', 'se']] }
+};
+
+class NoiseHandshake {
+    // opts: { pattern, suite, psk (Uint8Array 32), prologue (Uint8Array),
+    //         remoteStaticPub (Uint8Array 32, required for KKpsk0),
+    //         staticPriv / ephemeralPriv (Uint8Array 32 — test/persistence hooks) }
+    static async create(opts) {
+        const hs = new NoiseHandshake();
+        hs.pattern = opts.pattern;
+        hs.suite = opts.suite;
+        if (NOISE_SUITES_JS.indexOf(hs.suite) === -1) {
+            throw new Error('unsupported Noise suite: ' + hs.suite);
+        }
+        const script = NOISE_MESSAGE_PATTERNS[hs.pattern];
+        if (!script) throw new Error('unsupported Noise pattern: ' + hs.pattern);
+        if (!(opts.psk instanceof Uint8Array) || opts.psk.length !== 32) {
+            throw new Error('Noise PSK must be exactly 32 bytes');
+        }
+        hs.psk = opts.psk;
+        hs.messages = script.messages;
+        hs.messageIndex = 0;
+        hs.protocolName = 'Noise_' + hs.pattern + '_' + hs.suite;
+
+        hs.sPriv = opts.staticPriv || x25519GeneratePrivate();
+        hs.sPub = await x25519PublicFromPrivate(hs.sPriv);
+        hs.ePriv = opts.ephemeralPriv || null;  // generated lazily on 'e'
+        hs.ePub = null;
+        hs.rs = opts.remoteStaticPub || null;   // remote static (learned in XX)
+        hs.re = null;                            // remote ephemeral
+
+        hs.symmetric = await NoiseSymmetricState.create(
+            new TextEncoder().encode(hs.protocolName));
+        await hs.symmetric.mixHash(opts.prologue || new Uint8Array(0));
+
+        // pre-messages (KK): initiator's static, then responder's static
+        for (const tok of script.preMessages) {
+            if (tok === 's') await hs.symmetric.mixHash(hs.sPub);
+            else if (tok === 'rs') {
+                if (!hs.rs) throw new Error(hs.pattern + ' requires the remote static public key');
+                await hs.symmetric.mixHash(hs.rs);
+            }
+        }
+
+        hs.finished = false;
+        hs.handshakeHash = null;
+        hs.sendCipher = null;
+        hs.recvCipher = null;
+        return hs;
+    }
+
+    get expectsWrite() { return this.messageIndex % 2 === 0; }  // initiator
+
+    // produce the next handshake message (initiator turn)
+    async writeMessage(payload) {
+        payload = payload || new Uint8Array(0);
+        if (this.finished || !this.expectsWrite) throw new Error('Noise: not our turn to write');
+        const parts = [];
+        for (const tok of this.messages[this.messageIndex]) {
+            if (tok === 'e') {
+                if (!this.ePriv) this.ePriv = x25519GeneratePrivate();
+                this.ePub = await x25519PublicFromPrivate(this.ePriv);
+                parts.push(this.ePub);
+                await this.symmetric.mixHash(this.ePub);
+                // psk mode: 'e' additionally calls MixKey(e.public_key)
+                await this.symmetric.mixKey(this.ePub);
+            } else if (tok === 's') {
+                parts.push(await this.symmetric.encryptAndHash(this.sPub));
+            } else if (tok === 'psk') {
+                await this.symmetric.mixKeyAndHash(this.psk);
+            } else if (tok === 'ee') {
+                await this.symmetric.mixKey(await x25519(this.ePriv, this.re));
+            } else if (tok === 'es') {  // initiator: DH(e, rs)
+                await this.symmetric.mixKey(await x25519(this.ePriv, this.rs));
+            } else if (tok === 'se') {  // initiator: DH(s, re)
+                await this.symmetric.mixKey(await x25519(this.sPriv, this.re));
+            } else if (tok === 'ss') {
+                await this.symmetric.mixKey(await x25519(this.sPriv, this.rs));
+            }
+        }
+        parts.push(await this.symmetric.encryptAndHash(payload));
+        this.messageIndex++;
+        if (this.messageIndex === this.messages.length) await this._finish();
+        return concatBytes.apply(null, parts);
+    }
+
+    // consume the peer's handshake message (responder turn)
+    async readMessage(data) {
+        if (this.finished || this.expectsWrite) throw new Error('Noise: not our turn to read');
+        let off = 0;
+        for (const tok of this.messages[this.messageIndex]) {
+            if (tok === 'e') {
+                this.re = data.slice(off, off + 32); off += 32;
+                await this.symmetric.mixHash(this.re);
+                await this.symmetric.mixKey(this.re);  // psk mode
+            } else if (tok === 's') {
+                const len = this.symmetric.cipher.hasKey() ? 48 : 32;
+                this.rs = await this.symmetric.decryptAndHash(data.slice(off, off + len));
+                off += len;
+            } else if (tok === 'psk') {
+                await this.symmetric.mixKeyAndHash(this.psk);
+            } else if (tok === 'ee') {
+                await this.symmetric.mixKey(await x25519(this.ePriv, this.re));
+            } else if (tok === 'es') {  // initiator: DH(e, rs)
+                await this.symmetric.mixKey(await x25519(this.ePriv, this.rs));
+            } else if (tok === 'se') {  // initiator: DH(s, re)
+                await this.symmetric.mixKey(await x25519(this.sPriv, this.re));
+            } else if (tok === 'ss') {
+                await this.symmetric.mixKey(await x25519(this.sPriv, this.rs));
+            }
+        }
+        const payload = await this.symmetric.decryptAndHash(data.slice(off));
+        this.messageIndex++;
+        if (this.messageIndex === this.messages.length) await this._finish();
+        return payload;
+    }
+
+    async _finish() {
+        // Split(): initiator sends with c1, receives with c2
+        const [c1, c2] = await this.symmetric.split();
+        this.sendCipher = c1;
+        this.recvCipher = c2;
+        this.handshakeHash = this.symmetric.h;   // channel binding (§3.4.5)
+        this.finished = true;
+    }
+}
+
+// ── Noise transport (post-Split session encryption, §3.4.5) ──────────────────
+// Every post-handshake message is a Noise transport message; the first
+// plaintext byte tags the inner framing (JSON vs WIRE-1 binary), matching
+// hivemind_bus_client.noise.NoiseTransport.
+
+class NoiseTransport {
+    constructor(handshake) {
+        if (!handshake.finished) throw new Error('Noise handshake not finished');
+        this.sendCipher = handshake.sendCipher;
+        this.recvCipher = handshake.recvCipher;
+        this.remoteStaticKey = handshake.rs ? toHex(handshake.rs) : null;
+        this.handshakeHash = handshake.handshakeHash;
+    }
+
+    // payload: string (JSON HiveMessage) or Uint8Array (WIRE-1 binary frame)
+    async encryptFrame(payload) {
+        let plaintext;
+        if (typeof payload === 'string') {
+            plaintext = concatBytes(new Uint8Array([NOISE_FRAME_JSON]),
+                                    new TextEncoder().encode(payload));
+        } else {
+            plaintext = concatBytes(new Uint8Array([NOISE_FRAME_BINARY]), payload);
+        }
+        return await this.sendCipher.encryptWithAd(new Uint8Array(0), plaintext);
+    }
+
+    // returns a string (JSON frame) or Uint8Array (binary frame);
+    // throws on any AEAD failure (tampering / replay / reordering — fatal)
+    async decryptFrame(data) {
+        const plaintext = await this.recvCipher.decryptWithAd(new Uint8Array(0), data);
+        const marker = plaintext[0];
+        const body = plaintext.slice(1);
+        if (marker === NOISE_FRAME_JSON) return new TextDecoder().decode(body);
+        if (marker === NOISE_FRAME_BINARY) return body;
+        throw new Error('unknown v3 frame marker: ' + marker);
+    }
+}
+
+// ── Negotiation + PSK helpers ─────────────────────────────────────────────────
+
+// pick (pattern, suite) from the server's advertised lists; KKpsk0 preferred
+// when the remote static key is pinned/provisioned; null when no mutual option
+function selectNoiseOptions(serverPatterns, serverSuites, pinnedRemoteKey) {
+    const suite = (serverSuites || []).find(s => NOISE_SUITES_JS.indexOf(s) !== -1);
+    if (!suite) return null;
+    if (pinnedRemoteKey && (serverPatterns || []).indexOf(NOISE_PATTERN_KK) !== -1) {
+        return { pattern: NOISE_PATTERN_KK, suite };
+    }
+    if ((serverPatterns || []).indexOf(NOISE_PATTERN_XX) !== -1) {
+        return { pattern: NOISE_PATTERN_XX, suite };
+    }
+    return null;
+}
+
+// prologue per HIVEMIND-CRYPTO-1 §3.4.3: exact server cleartext HELLO payload
+// bytes + exact cleartext parameter HANDSHAKE payload bytes + the node's
+// selected Noise protocol name (canonical JSON on both sides — matches
+// hivemind_bus_client.noise.build_prologue)
+function buildNoisePrologue(helloPayload, handshakePayload, protocolName) {
+    const enc = new TextEncoder();
+    return concatBytes(enc.encode(canonicalJson(helloPayload || {})),
+                       enc.encode(canonicalJson(handshakePayload || {})),
+                       enc.encode(protocolName));
+}
+
+// PBKDF2 PSK derivation for constrained peers (HIVEMIND-CRYPTO-1 §3.4.4):
+//   PSK = PBKDF2-HMAC-SHA256(password, SHA-256(node_id), iterations, 32)
+// Only interoperable when the server derives the PSK the same way (i.e. it
+// advertises PBKDF2 as the PSK KDF).  Web Crypto has no argon2id, so with an
+// argon2id server (the default) the PSK must be provisioned instead.
+async function derivePskPBKDF2(password, nodeId, iterations) {
+    iterations = iterations || 100000;
+    if (iterations < 100000) iterations = 100000;  // spec floor
+    const salt = await sha256(new TextEncoder().encode(nodeId));
+    const baseKey = await crypto.subtle.importKey(
+        'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits(
+        { name: 'PBKDF2', hash: 'SHA-256', salt: salt, iterations: iterations },
+        baseKey, 256);
+    return new Uint8Array(bits);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Connection states
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -439,18 +868,55 @@ function JarbasHiveMind() {
     this._binarize = false;    // true after handshake if server+client agree on binary frames
     this._serverSupportsBinarize = false;
     this.ws = null;
+
+    // protocol v3 (Noise) state
+    this._maxProtocolVersion = 3;   // highest protocol version this client offers
+    this._psk = null;               // Uint8Array(32) — provisioned Noise PSK
+    this._serverNoiseKey = null;    // hex — pinned/provisioned server static key
+    this._noiseStaticKey = null;    // Uint8Array(32) — this node's static X25519 private key
+    this._serverHelloPayload = null;      // raw payload objects, retained for
+    this._serverHandshakePayload = null;  // the Noise prologue (§3.4.3)
+    this._noiseHandshake = null;    // NoiseHandshake in flight
+    this._noiseTransport = null;    // NoiseTransport after Split()
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 // Same 5-arg signature as V0 for backward compat; `password` replaces crypto_key.
-JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, password) {
+// Optional 6th `options` object enables protocol v3 (Noise):
+//   psk:                32-byte Uint8Array or 64-char hex — the provisioned Noise
+//                       PSK, equal to the server's argon2id(password, SHA-256(node_id)).
+//                       Web Crypto has no argon2id, so against an argon2id server
+//                       (the default) the PSK MUST be provisioned this way.
+//   serverNoiseKey:     hex — pinned server static X25519 public key; enables the
+//                       KKpsk0 pattern and aborts on key mismatch (TOFU pinning).
+//   noiseStaticKey:     32-byte Uint8Array or hex — this node's static X25519
+//                       private key (persist it to keep a stable node identity).
+//   maxProtocolVersion: cap the negotiated protocol version (default 3).
+JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, password, options) {
+    options = options || {};
     this._password = password;
     this._sessionId = _randomUUID();
     this._handshake = new PasswordHandShake(password);
     this._state = States.DISCONNECTED;
     this._binarize = false;
     this._serverSupportsBinarize = false;
+
+    this._maxProtocolVersion = options.maxProtocolVersion !== undefined ? options.maxProtocolVersion : 3;
+    this._psk = typeof options.psk === 'string' ? fromHex(options.psk) : (options.psk || null);
+    if (this._psk && this._psk.length !== 32) {
+        throw new Error('psk must be exactly 32 bytes');
+    }
+    this._serverNoiseKey = options.serverNoiseKey || null;
+    this._noiseStaticKey = typeof options.noiseStaticKey === 'string'
+        ? fromHex(options.noiseStaticKey) : (options.noiseStaticKey || null);
+    // fixed ephemeral key — deterministic interop tests ONLY, never production
+    this._noiseEphemeralKey = typeof options._noiseEphemeralKey === 'string'
+        ? fromHex(options._noiseEphemeralKey) : (options._noiseEphemeralKey || null);
+    this._serverHelloPayload = null;
+    this._serverHandshakePayload = null;
+    this._noiseHandshake = null;
+    this._noiseTransport = null;
 
     var authToken = btoa(username + ':' + accessKey);
     var url = 'ws://' + host + ':' + port + '?authorization=' + authToken;
@@ -467,6 +933,12 @@ JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, pa
 JarbasHiveMind.prototype.sendMessage = async function (hiveMessage) {
     if (this._state < States.READY) {
         throw new Error('Not connected: handshake not complete');
+    }
+    if (this._noiseTransport) {
+        // protocol v3: every message is a Noise transport message (§3.4.5)
+        var v3frame = await this._noiseTransport.encryptFrame(JSON.stringify(hiveMessage));
+        this.ws.send(v3frame.buffer);
+        return;
     }
     if (this._binarize) {
         var payloadStr = JSON.stringify(hiveMessage.payload);
@@ -571,6 +1043,8 @@ JarbasHiveMind.prototype._onWsMessage = async function (event) {
 JarbasHiveMind.prototype._onWsClose = function () {
     this._state = States.DISCONNECTED;
     this._sessionKey = null;
+    this._noiseHandshake = null;
+    this._noiseTransport = null;
     this.onHiveDisconnected();
 };
 
@@ -592,19 +1066,151 @@ JarbasHiveMind.prototype._handleServerHello = async function (payload) {
     this._serverPubKey  = payload.pubkey   || null;
     this._serverNodeId  = payload.node_id  || null;
     this._serverPeer    = payload.peer     || null;
+    // exact payload retained for the Noise prologue (§3.4.3)
+    this._serverHelloPayload = payload;
     this._state = States.HELLO_RECEIVED;
 };
 
 JarbasHiveMind.prototype._handleServerHandshake = async function (payload) {
-    if ('envelope' in payload) {
+    if (payload.noise && payload.noise.msg && this._noiseHandshake) {
+        // protocol v3: server's Noise handshake message
+        await this._receiveNoiseHandshake(payload);
+    } else if ('envelope' in payload) {
         // Server is responding to our HANDSHAKE with its own envelope
         await this._receiveHandshakeResponse(payload);
     } else {
         // Server is requesting that we start the handshake; store its binarize preference
         this._serverSupportsBinarize = !!payload.binarize;
+        this._serverHandshakePayload = payload;  // Noise prologue binding (§3.4.3)
         console.log('HiveMind: HANDSHAKE request received');
-        await this._sendClientHandshake(payload);
+        var psk = await this._resolveNoisePsk(payload);
+        if (psk) {
+            await this._startNoiseHandshake(payload, psk);
+        } else {
+            await this._sendClientHandshake(payload);
+        }
     }
+};
+
+// ── Protocol v3 (Noise) handshake ─────────────────────────────────────────────
+
+// Returns the 32-byte PSK when protocol v3 should be used, else null (legacy
+// v0-v2 path).  Version negotiation per HIVEMIND-WIRE-1 §2: both peers operate
+// at the highest protocol version both support.
+JarbasHiveMind.prototype._resolveNoisePsk = async function (payload) {
+    if (this._maxProtocolVersion < 3) return null;
+    if ((payload.max_protocol_version || 1) < 3) return null;
+    var noiseParams = payload.noise;
+    if (!noiseParams || typeof noiseParams !== 'object') return null;
+    if (!selectNoiseOptions(noiseParams.patterns, noiseParams.suites, this._serverNoiseKey)) {
+        // no mutual pattern/suite (e.g. server only offers ChaChaPoly, which
+        // Web Crypto cannot provide) -> legacy handshake
+        console.warn('HiveMind: no mutual Noise pattern/suite, using legacy handshake');
+        return null;
+    }
+    // 1. provisioned PSK — always interoperates (equals the server's
+    //    argon2id(password, SHA-256(node_id)), computed once on a capable host)
+    if (this._psk) return this._psk;
+    // 2. password via PBKDF2 — only when the server advertises PBKDF2 as its
+    //    PSK KDF (§3.4.4); the KDF params are part of the prologue-bound payload
+    var kdf = noiseParams.kdf || {};
+    if (this._password && (kdf.name === 'PBKDF2' || kdf.name === 'PBKDF2-HMAC-SHA256')) {
+        return await derivePskPBKDF2(this._password, this._serverNodeId || '', kdf.iterations);
+    }
+    // 3. argon2id server (the default) and no provisioned PSK: Web Crypto has
+    //    no argon2id, so a password-only JS client cannot derive the PSK.
+    console.error(
+        'HiveMind: server offers protocol v3 (Noise) but no PSK is available. ' +
+        'Web Crypto has no argon2id, so pass connect(..., { psk }) with the ' +
+        '32-byte PSK provisioned from a capable host — ' +
+        'argon2id(password, SHA-256(node_id)) — or configure the server to ' +
+        'advertise PBKDF2 as the PSK KDF. Falling back to the legacy handshake.');
+    return null;
+};
+
+// §3.4.3 step 3: select pattern/suite, bind the prologue, send Noise message 1
+JarbasHiveMind.prototype._startNoiseHandshake = async function (payload, psk) {
+    var noiseParams = payload.noise;
+    var sel = selectNoiseOptions(noiseParams.patterns, noiseParams.suites, this._serverNoiseKey);
+    var protocolName = 'Noise_' + sel.pattern + '_' + sel.suite;
+    var prologue = buildNoisePrologue(this._serverHelloPayload, payload, protocolName);
+    try {
+        this._noiseHandshake = await NoiseHandshake.create({
+            pattern: sel.pattern,
+            suite: sel.suite,
+            psk: psk,
+            prologue: prologue,
+            staticPriv: this._noiseStaticKey || undefined,
+            ephemeralPriv: this._noiseEphemeralKey || undefined,
+            remoteStaticPub: sel.pattern === NOISE_PATTERN_KK && this._serverNoiseKey
+                ? fromHex(this._serverNoiseKey) : undefined
+        });
+        // Noise payload of message 1: preference-ordered encodings + binarize
+        var msg1Payload = new TextEncoder().encode(canonicalJson({
+            binarize: false,
+            encodings: ['JSON-HEX']
+        }));
+        var msg1 = await this._noiseHandshake.writeMessage(msg1Payload);
+    } catch (e) {
+        this._abortNoise('failed to initialize Noise handshake: ' + e.message);
+        return;
+    }
+    console.log('HiveMind: starting protocol v3 handshake: ' + protocolName);
+    this._send(this._wrap('shake', {
+        noise: { pattern: sel.pattern, suite: sel.suite, msg: toHex(msg1) }
+    }));
+    this._state = States.HANDSHAKE_SENT;
+};
+
+// §3.4.3 steps 4-7: consume the server's Noise message, send message 3 (XX),
+// Split(), then send the encrypted HELLO as the first Noise transport message
+JarbasHiveMind.prototype._receiveNoiseHandshake = async function (payload) {
+    var msg;
+    try {
+        msg = fromHex(payload.noise.msg);
+    } catch (e) {
+        this._abortNoise('malformed Noise handshake envelope');
+        return;
+    }
+    var serverSelection = {};
+    try {
+        var noisePayload = await this._noiseHandshake.readMessage(msg);
+        if (!this._noiseHandshake.finished) {
+            // XXpsk2 message 3: our (encrypted) static key + final DH mix
+            var msg3 = await this._noiseHandshake.writeMessage(new Uint8Array(0));
+            this._send(this._wrap('shake', { noise: { msg: toHex(msg3) } }));
+        }
+        if (noisePayload && noisePayload.length) {
+            try { serverSelection = JSON.parse(new TextDecoder().decode(noisePayload)); } catch (_) {}
+        }
+        var transport = new NoiseTransport(this._noiseHandshake);
+    } catch (e) {
+        // wrong password/PSK, tampered negotiation (prologue mismatch) or a bad
+        // static key -> fatal, fails cryptographically at handshake time (§3.4.3)
+        this._abortNoise('Noise handshake authentication failure (wrong PSK/password or tampered negotiation)');
+        return;
+    }
+    // TOFU-then-pin the server's static key (§3.4.5)
+    if (this._serverNoiseKey && transport.remoteStaticKey !== this._serverNoiseKey) {
+        this._abortNoise('server Noise static key mismatch — possible man-in-the-middle');
+        return;
+    }
+    this._serverNoiseKey = transport.remoteStaticKey;  // expose for pinning by the caller
+    this._encoding = serverSelection.encoding || 'JSON-HEX';
+    this._noiseTransport = transport;
+    this._noiseHandshake = null;
+    this._state = States.KEY_DERIVED;
+    console.log('HiveMind: protocol v3 Noise session established');
+    await this._sendClientHello();
+};
+
+JarbasHiveMind.prototype._abortNoise = function (reason) {
+    // fatal handshake failure — reject the connection (§3.4.3)
+    console.error('HiveMind: aborting protocol v3 connection: ' + reason);
+    this._noiseHandshake = null;
+    this._noiseTransport = null;
+    this._state = States.DISCONNECTED;
+    try { this.ws.close(); } catch (_) {}
 };
 
 JarbasHiveMind.prototype._sendClientHandshake = async function (serverPayload) {
@@ -644,6 +1250,15 @@ JarbasHiveMind.prototype._sendClientHello = async function () {
         site_id: 'browser'
     };
     var hiveMsg = this._wrap('hello', helloPayload);
+    if (this._noiseTransport) {
+        // protocol v3: the encrypted HELLO is the first Noise transport message
+        var frame = await this._noiseTransport.encryptFrame(JSON.stringify(hiveMsg));
+        this.ws.send(frame.buffer);
+        this._state = States.READY;
+        console.log('HiveMind: HELLO sent — Connected');
+        this.onHiveConnected();
+        return;
+    }
     // HELLO is sent encrypted (key is now established)
     var encrypted = await this._encrypt(JSON.stringify(hiveMsg));
     this._send(encrypted);
@@ -679,6 +1294,43 @@ JarbasHiveMind.prototype._handleUserMessage = function (msg) {
 // decrypt → decode bitstring → dispatch to _handleUserMessage.
 JarbasHiveMind.prototype._handleBinaryWsMessage = async function (buffer) {
     var frame = new Uint8Array(buffer);
+    if (this._noiseTransport) {
+        // protocol v3: only valid Noise transport messages are accepted after
+        // Split(); an AEAD failure means tampering/replay and is fatal (§3.4.5)
+        var inner;
+        try {
+            inner = await this._noiseTransport.decryptFrame(frame);
+        } catch (e) {
+            this._abortNoise('Noise transport message rejected (tampered, replayed or out-of-order)');
+            return;
+        }
+        if (typeof inner === 'string') {
+            var v3msg;
+            try {
+                v3msg = JSON.parse(inner);
+            } catch (e) {
+                console.error('HiveMind: failed to parse v3 frame', e);
+                return;
+            }
+            this._handleUserMessage(v3msg);
+        } else {
+            // WIRE-1 binary frame inside the Noise transport message
+            try {
+                var v3decoded = await decodeBitstring(inner);
+            } catch (e) {
+                console.error('HiveMind: bitstring decode failed', e);
+                return;
+            }
+            var v3payload = v3decoded.payload;
+            if (v3decoded.msgType !== 'bin' && typeof v3payload === 'string') {
+                try { v3payload = JSON.parse(v3payload); } catch (_) {}
+            }
+            var v3wrapped = { msg_type: v3decoded.msgType, payload: v3payload, metadata: v3decoded.metadata };
+            if (v3decoded.msgType === 'bin') v3wrapped.bin_type = v3decoded.binType;
+            this._handleUserMessage(v3wrapped);
+        }
+        return;
+    }
     var plaintext;
     try {
         plaintext = await decryptAesGcmBin(this._sessionKey, frame);
@@ -762,6 +1414,11 @@ if (typeof module !== 'undefined') {
         encryptAesGcm, decryptAesGcm,
         encryptAesGcmBin, decryptAesGcmBin,
         encodeBitstring, decodeBitstring,
-        BIN_TYPES, MSG_TYPE_TO_INT, INT_TO_MSG_TYPE
+        BIN_TYPES, MSG_TYPE_TO_INT, INT_TO_MSG_TYPE,
+        // protocol v3 (Noise)
+        NoiseHandshake, NoiseTransport, NoiseCipherState, NoiseSymmetricState,
+        selectNoiseOptions, buildNoisePrologue, canonicalJson, derivePskPBKDF2,
+        noiseHkdf, x25519, x25519PublicFromPrivate,
+        NOISE_PATTERN_XX, NOISE_PATTERN_KK, NOISE_SUITES_JS
     };
 }

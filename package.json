@@ -43,6 +43,9 @@
     "voice-assistant",
     "websocket",
     "protocol-v1",
+    "protocol-v3",
+    "noise-protocol",
+    "x25519",
     "aes-gcm",
     "web-crypto"
   ],
