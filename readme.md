@@ -89,9 +89,11 @@ hivemind.connect('127.0.0.1', 5678, 'HivemindNode', 'ivf1NQSkQNogWYyr', 'mypassw
 
 ## API reference
 
-### `connect(host, port, username, accessKey, password)`
+### `connect(host, port, username, accessKey, password, options?)`
 
-Opens a WebSocket connection and runs the Protocol V1 handshake automatically.
+Opens a WebSocket connection and runs the handshake automatically. When the
+server offers protocol v3 (Noise) and a PSK is available, the Noise handshake
+is used; otherwise the legacy Protocol V1 handshake runs.
 
 | Argument | Type | Description |
 |----------|------|-------------|
@@ -100,6 +102,16 @@ Opens a WebSocket connection and runs the Protocol V1 handshake automatically.
 | `username` | string | Client name / user-agent string |
 | `accessKey` | string | Access key issued to the client |
 | `password` | string | Shared password for PBKDF2 session-key derivation |
+| `options` | object | Optional — protocol v3 (Noise) settings, see below |
+
+`options` fields (all optional):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `psk` | `Uint8Array` or hex string | Provisioned 32-byte Noise PSK — equal to the server's `argon2id(password, SHA-256(node_id))`, computed once on a capable host |
+| `serverNoiseKey` | hex string | Pinned server static X25519 public key; enables `KKpsk0` and aborts on mismatch (TOFU pinning) |
+| `noiseStaticKey` | `Uint8Array` or hex string | This node's static X25519 private key — persist it to keep a stable node identity across connections |
+| `maxProtocolVersion` | number | Cap the negotiated protocol version (default `3`) |
 
 Returns the raw `WebSocket` instance.
 
@@ -155,6 +167,57 @@ Available globals (after loading `hivemind.js`): `encodeBitstring`, `decodeBitst
 
 See [`docs/binary.md`](docs/binary.md) for the full frame layout, bitstring format, and API reference.
 
+## Protocol v3 — Noise handshake
+
+When the server advertises `max_protocol_version >= 3` together with its Noise
+`patterns`/`suites`, the client runs an authenticated key exchange built on the
+[Noise Protocol Framework](https://noiseprotocol.org/noise.html) (revision 34)
+instead of the legacy handshake — see HIVEMIND-CRYPTO-1 §3.4. It provides
+mutual static-key authentication, forward secrecy, password authentication
+without an offline-attackable artifact on the wire, and transcript binding
+(any tampering with the negotiation aborts the handshake).
+
+Web Crypto has no ChaCha20-Poly1305, so this client implements the spec's
+optional AES-GCM suite — still with no external dependencies:
+
+- `Noise_XXpsk2_25519_AESGCM_SHA256` — general case (static keys exchanged in
+  the handshake, TOFU-then-pin)
+- `Noise_KKpsk0_25519_AESGCM_SHA256` — pre-provisioned static keys (pass
+  `serverNoiseKey`)
+
+The suite is only selected when the server offers it; a server that only
+offers ChaCha20-Poly1305 falls back to the legacy v0–v2 handshake.
+
+After the handshake, **all** session traffic travels as Noise transport
+messages (binary WebSocket frames) under per-direction cipher states with
+strictly sequential 64-bit counter nonces — replayed, reordered or tampered
+messages fail authentication and terminate the session.
+
+### The PSK — provisioning vs password
+
+The shared site password enters the handshake as a 32-byte Noise PSK. The
+server derives it as `argon2id(password, SHA-256(node_id))` by default, and
+**Web Crypto has no argon2id**, so a browser/Node client is a *constrained*
+peer (HIVEMIND-CRYPTO-1 §3.4.4):
+
+- **Provisioned PSK (recommended):** compute the PSK once on a capable host
+  and pass it as `options.psk`. With the Python stack:
+
+  ```python
+  from poorman_handshake.noise import derive_psk
+  psk = derive_psk("site password", node_id="<server node_id>")
+  print(psk.hex())  # -> options.psk
+  ```
+
+- **Password via PBKDF2:** if the server advertises `PBKDF2` as its PSK KDF in
+  the handshake parameters, the client derives
+  `PBKDF2-HMAC-SHA256(password, SHA-256(node_id), >=100000, 32)` on-device.
+
+With an argon2id server and no provisioned PSK the client logs a clear
+operator error and falls back to the legacy handshake.
+
+Requires `X25519` support in Web Crypto: all modern browsers, Node.js 20+.
+
 ## Protocol V1 overview
 
 Connection flow:
@@ -192,6 +255,7 @@ Test suite (~40 tests across 4 files):
 | `test/encryption.test.js` | AES-GCM encrypt/decrypt, wire format, Python-vector round-trip |
 | `test/handshake.test.js` | Full connection state machine with a `MockWebSocket` |
 | `test/binary.test.js` | Bitstring codec, binary encryption, binarize handshake negotiation, binary send/receive |
+| `test/noise.test.js` | Protocol v3 Noise handshake: byte-level interop against Python `noiseprotocol` responder fixtures (XXpsk2 + KKpsk0), wrong-PSK/tampered-prologue failure, transport replay rejection, PBKDF2 PSK, client negotiation + v0-v2 fallback |
 
 To regenerate the cross-language test vectors, run `test/generate_vectors.py` in a
 Python environment that has `hivemind-bus-client` and `poorman_handshake` installed.
@@ -200,6 +264,15 @@ encoding) is byte-for-byte identical to the Python reference implementation:
 
 ```bash
 python3 test/generate_vectors.py
+```
+
+The protocol v3 (Noise) vectors are generated separately by
+`test/generate_noise_vectors.py`, which drives the Python `noiseprotocol`
+library (the engine `poorman_handshake.noise` wraps) as the server-role
+responder with fixed keys and records every handshake and transport byte:
+
+```bash
+python3 test/generate_noise_vectors.py   # needs: pip install noiseprotocol
 ```
 
 ### Live end-to-end test
@@ -238,6 +311,9 @@ HiveMind-js/
 │   ├── handshake.test.js    # State machine integration tests
 │   ├── binary.test.js       # Bitstring codec + binarize mode tests
 │   ├── generate_vectors.py  # Python script — regenerates vectors.json
+│   ├── noise.test.js        # protocol v3 Noise interop tests
+│   ├── noise_vectors.json   # Noise interop vectors (from Python noiseprotocol)
+│   ├── generate_noise_vectors.py  # regenerates noise_vectors.json
 │   ├── vectors.json         # Cross-compat test vectors (Python ↔ JS)
 │   └── e2e/
 │       ├── loopback_hub.py      # Boots a real hivemind-core loopback hub + asserts
