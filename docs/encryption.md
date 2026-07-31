@@ -55,7 +55,7 @@ The encoding applies to each binary field in the JSON output.
 
 | Value | Encoding |
 |-------|----------|
-| `JSON-HEX` | Hexadecimal (Base16) — **default** |
+| `JSON-HEX` | Hexadecimal (Base16), **default** |
 | `JSON-B64` | Standard Base64 |
 | `JSON-URLSAFE-B64` | URL-safe Base64 |
 | `JSON-B32` | Base32 |
@@ -73,7 +73,7 @@ When `binarize: true` is negotiated, the payload is sent as raw WebSocket binary
 [ nonce (16 or 12 bytes) | ciphertext (variable) | tag (16 bytes) ]
 ```
 
-No encoding step — raw bytes are sent directly as a WebSocket binary message.
+No encoding step, raw bytes are sent directly as a WebSocket binary message.
 
 ## Web Crypto API compatibility note
 
@@ -179,3 +179,6 @@ async function decryptAesGcm(keyBytes, payload) {
 ## Key format
 
 The session key from `PasswordHandShake.deriveSecret()` is a `Uint8Array` of 32 bytes. Pass it directly to `crypto.subtle.importKey` as `"raw"`.
+
+---
+[← Handshake](handshake.md) · [Home](../readme.md) · [Binary →](binary.md)

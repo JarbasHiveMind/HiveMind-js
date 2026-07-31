@@ -2,9 +2,9 @@
 
 ![logo](./hivemindjs.png)
 
-JavaScript client for HiveMind — Protocol V1. Runs in the browser and in Node.js 18+.
+JavaScript client for HiveMind, Protocol V1. Runs in the browser and in Node.js 18+.
 
-Uses the native [Web Crypto API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API) (`crypto.subtle`) for X25519, SHA-256, HMAC and AES-GCM, plus [`@noble/ciphers`](https://github.com/paulmillr/noble-ciphers) and [`@noble/hashes`](https://github.com/paulmillr/noble-hashes) (pure-JS, audited, no WASM) for the two primitives Web Crypto lacks: **ChaCha20-Poly1305** (the default protocol-v3 Noise AEAD) and **argon2id** (the default PSK derivation). This gives HiveMind-js **full cipher parity with hivemind-core** — every registered Noise suite and PSK derivation. Node.js 18+; protocol v3 needs Node.js 20+ (Web Crypto X25519).
+Uses the native [Web Crypto API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API) (`crypto.subtle`) for X25519, SHA-256, HMAC and AES-GCM, plus [`@noble/ciphers`](https://github.com/paulmillr/noble-ciphers) and [`@noble/hashes`](https://github.com/paulmillr/noble-hashes) (pure-JS, audited, no WASM) for the two primitives Web Crypto lacks: **ChaCha20-Poly1305** (the default protocol-v3 Noise AEAD) and **argon2id** (the default PSK derivation). This gives HiveMind-js **full cipher parity with hivemind-core**, every registered Noise suite and PSK derivation. Node.js 18+; protocol v3 needs Node.js 20+ (Web Crypto X25519).
 
 ## Install
 
@@ -12,7 +12,7 @@ Uses the native [Web Crypto API](https://developer.mozilla.org/en-US/docs/Web/AP
 npm install hivemind-js
 ```
 
-In Node.js the `@noble` dependencies are resolved automatically. For the browser see [Browser build](#browser-build) below — `hivemind.js` itself is a plain script, and it expects the two `@noble` primitives to be exposed on `globalThis.HiveMindNoble` (a five-line bundle step). Without them the client still runs, but degrades to the Web-Crypto-only AES-GCM + PBKDF2 subset (it cannot negotiate the default ChaChaPoly suite or derive an argon2id PSK).
+In Node.js the `@noble` dependencies are resolved automatically. For the browser see [Browser build](#browser-build) below, `hivemind.js` itself is a plain script, and it expects the two `@noble` primitives to be exposed on `globalThis.HiveMindNoble` (a five-line bundle step). Without them the client still runs, but degrades to the Web-Crypto-only AES-GCM + PBKDF2 subset (it cannot negotiate the default ChaChaPoly suite or derive an argon2id PSK).
 
 ## Quick start (browser)
 
@@ -23,7 +23,7 @@ In Node.js the `@noble` dependencies are resolved automatically. For the browser
     <meta charset="UTF-8">
     <title>HiveMind JS Demo</title>
     <!-- Web Crypto is built in; expose @noble on globalThis.HiveMindNoble
-         for the default ChaChaPoly suite + argon2id PSK — see "Browser build" -->
+         for the default ChaChaPoly suite + argon2id PSK, see "Browser build" -->
     <script src="static/js/hivemind.js"></script>
 </head>
 <body>
@@ -32,7 +32,7 @@ In Node.js the `@noble` dependencies are resolved automatically. For the browser
 
     // Override event hooks before connecting
     hivemind.onHiveConnected = function () {
-        // Fires only after the full handshake completes — not on socket open
+        // Fires only after the full handshake completes, not on socket open
         window.alert("Connected to HiveMind!");
     };
 
@@ -48,7 +48,7 @@ In Node.js the `@noble` dependencies are resolved automatically. For the browser
     // The 5th argument is the V1 shared password used for PBKDF2 key derivation.
     hivemind.connect("127.0.0.1", 5678, "HivemindWebChat", "ivf1NQSkQNogWYyr", "mypassword");
 
-    // sendUtterance / sendMessage are async — safe to call after onHiveConnected fires
+    // sendUtterance / sendMessage are async, safe to call after onHiveConnected fires
     hivemind.onHiveConnected = async function () {
         await hivemind.sendUtterance("tell me a joke");
     };
@@ -87,7 +87,7 @@ hivemind.connect('127.0.0.1', 5678, 'HivemindNode', 'ivf1NQSkQNogWYyr', 'mypassw
 
 Node needs `ws` only as a dev dependency (Node lacks a built-in `WebSocket`
 global). The runtime crypto dependencies are `@noble/ciphers` and
-`@noble/hashes` — small, audited, pure-JS — used only for ChaCha20-Poly1305 and
+`@noble/hashes`, small, audited, pure-JS, used only for ChaCha20-Poly1305 and
 argon2id; everything else uses native Web Crypto.
 
 ## API reference
@@ -105,15 +105,15 @@ is used; otherwise the legacy Protocol V1 handshake runs.
 | `username` | string | Client name / user-agent string |
 | `accessKey` | string | Access key issued to the client |
 | `password` | string | Shared password for PBKDF2 session-key derivation |
-| `options` | object | Optional — protocol v3 (Noise) settings, see below |
+| `options` | object | Optional, protocol v3 (Noise) settings, see below |
 
 `options` fields (all optional):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `psk` | `Uint8Array` or hex string | Optional pre-provisioned 32-byte Noise PSK. Normally unnecessary — a `password` is stretched with argon2id on-device to the same value; provide `psk` only to skip derivation or when no password is configured |
+| `psk` | `Uint8Array` or hex string | Optional pre-provisioned 32-byte Noise PSK. Normally unnecessary, a `password` is stretched with argon2id on-device to the same value; provide `psk` only to skip derivation or when no password is configured |
 | `serverNoiseKey` | hex string | Pinned server static X25519 public key; enables `KKpsk0` and aborts on mismatch (TOFU pinning) |
-| `noiseStaticKey` | `Uint8Array` or hex string | This node's static X25519 private key — persist it to keep a stable node identity across connections |
+| `noiseStaticKey` | `Uint8Array` or hex string | This node's static X25519 private key, persist it to keep a stable node identity across connections |
 | `maxProtocolVersion` | number | Cap the negotiated protocol version (default `3`) |
 
 Returns the raw `WebSocket` instance.
@@ -134,7 +134,7 @@ Override these on your instance before calling `connect()`:
 
 | Hook | When it fires |
 |------|---------------|
-| `onHiveConnected()` | Handshake complete — safe to call `sendMessage` |
+| `onHiveConnected()` | Handshake complete, safe to call `sendMessage` |
 | `onHiveDisconnected()` | WebSocket closed |
 | `onMycroftMessage(msg)` | Any `bus` message received |
 | `onMycroftSpeak(msg)` | `bus` message with type `speak` |
@@ -170,38 +170,38 @@ Available globals (after loading `hivemind.js`): `encodeBitstring`, `decodeBitst
 
 See [`docs/binary.md`](docs/binary.md) for the full frame layout, bitstring format, and API reference.
 
-## Protocol v3 — Noise handshake
+## Protocol v3, Noise handshake
 
 When the server advertises `max_protocol_version >= 3` together with its Noise
 `patterns`/`suites`, the client runs an authenticated key exchange built on the
 [Noise Protocol Framework](https://noiseprotocol.org/noise.html) (revision 34)
-instead of the legacy handshake — see HIVEMIND-CRYPTO-1 §3.4. It provides
+instead of the legacy handshake, see HIVEMIND-CRYPTO-1 §3.4. It provides
 mutual static-key authentication, forward secrecy, password authentication
 without an offline-attackable artifact on the wire, and transcript binding
 (any tampering with the negotiation aborts the handshake).
 
 This client supports **both** registered cipher suites (HIVEMIND-CRYPTO-1
-§3.4.1) across **both** patterns — full parity with hivemind-core:
+§3.4.1) across **both** patterns, full parity with hivemind-core:
 
-- `Noise_XXpsk2_25519_ChaChaPoly_SHA256` — **default**, general case (static
+- `Noise_XXpsk2_25519_ChaChaPoly_SHA256`, **default**, general case (static
   keys exchanged in the handshake, TOFU-then-pin)
-- `Noise_KKpsk0_25519_ChaChaPoly_SHA256` — **default**, pre-provisioned static
+- `Noise_KKpsk0_25519_ChaChaPoly_SHA256`, **default**, pre-provisioned static
   keys (pass `serverNoiseKey`)
-- `Noise_XXpsk2_25519_AESGCM_SHA256` / `Noise_KKpsk0_25519_AESGCM_SHA256` —
+- `Noise_XXpsk2_25519_AESGCM_SHA256` / `Noise_KKpsk0_25519_AESGCM_SHA256` ,
   Web-Crypto-native AES-GCM variants
 
 ChaCha20-Poly1305 (via `@noble/ciphers`) is **preferred**, matching the Python
 client's preference order; the suite is negotiated from the server's advertised
 list, with AES-GCM chosen only when the server offers AES-GCM but not
 ChaChaPoly. When no mutual suite exists the client falls back to the legacy
-v0–v2 handshake.
+v0-v2 handshake.
 
 After the handshake, **all** session traffic travels as Noise transport
 messages (binary WebSocket frames) under per-direction cipher states with
-strictly sequential 64-bit counter nonces — replayed, reordered or tampered
+strictly sequential 64-bit counter nonces, replayed, reordered or tampered
 messages fail authentication and terminate the session.
 
-### The PSK — password (default) vs provisioning
+### The PSK, password (default) vs provisioning
 
 The shared site password enters the handshake as a 32-byte Noise PSK. The
 server derives it as `argon2id(password, SHA-256(node_id))` by default, and this
@@ -214,7 +214,7 @@ is byte-verified against `poorman_handshake.noise.derive_psk` in the test suite.
 Alternative PSK inputs, in priority order:
 
 - **Provisioned PSK:** pass `options.psk` (32-byte `Uint8Array` or hex) to skip
-  derivation. Compute it on any capable host — e.g. Python:
+  derivation. Compute it on any capable host, e.g. Python:
 
   ```python
   from poorman_handshake.noise import derive_psk
@@ -267,7 +267,7 @@ WebSocket open  →  Server HELLO  →  Server HANDSHAKE (request)
 Key points:
 - `onHiveConnected` fires **after** the full handshake, not on WebSocket `open`
 - All regular messages are encrypted with AES-GCM (JSON-HEX encoding by default)
-- The session key is derived fresh per-connection — the password is never transmitted
+- The session key is derived fresh per-connection, the password is never transmitted
 
 See [`docs/handshake.md`](docs/handshake.md), [`docs/encryption.md`](docs/encryption.md), [`docs/protocol.md`](docs/protocol.md), and [`docs/binary.md`](docs/binary.md) for details.
 
@@ -319,7 +319,7 @@ in-process loopback transport, launches the Node driver
 ([`test/e2e/js_e2e_driver.mjs`](test/e2e/js_e2e_driver.mjs)) which loads the actual
 `static/js/hivemind.js`, connects over a real WebSocket, performs the full V1
 handshake, and sends an encrypted utterance. The Python side then asserts the hub
-received that exact utterance with a real session id — so the wire behaviour, not
+received that exact utterance with a real session id, so the wire behaviour, not
 just the vectors, is verified end to end. No external network or fixed ports.
 
 ```bash
@@ -340,20 +340,20 @@ conformance suite.
 ```
 HiveMind-js/
 ├── static/js/
-│   └── hivemind.js          # Main client — Protocol V1
+│   └── hivemind.js          # Main client, Protocol V1
 ├── test/
 │   ├── crypto.test.js       # PasswordHandShake unit tests
 │   ├── encryption.test.js   # AES-GCM unit tests
 │   ├── handshake.test.js    # State machine integration tests
 │   ├── binary.test.js       # Bitstring codec + binarize mode tests
-│   ├── generate_vectors.py  # Python script — regenerates vectors.json
+│   ├── generate_vectors.py  # Python script, regenerates vectors.json
 │   ├── noise.test.js        # protocol v3 Noise interop tests
 │   ├── noise_vectors.json   # Noise interop vectors (from Python noiseprotocol)
 │   ├── generate_noise_vectors.py  # regenerates noise_vectors.json
 │   ├── vectors.json         # Cross-compat test vectors (Python ↔ JS)
 │   └── e2e/
 │       ├── loopback_hub.py      # Boots a real hivemind-core loopback hub + asserts
-│       ├── js_e2e_driver.mjs    # Node driver — connects the real client to the hub
+│       ├── js_e2e_driver.mjs    # Node driver, connects the real client to the hub
 │       └── requirements.txt     # Test-only Python deps for the hub
 ├── docs/
 │   ├── protocol.md          # HiveMessage wire format reference

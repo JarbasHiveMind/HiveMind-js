@@ -26,7 +26,7 @@ Every binary WebSocket frame is an AES-GCM encrypted payload:
 | nonce (16 bytes) | ciphertext (variable) | tag (16 bytes) |
 ```
 
-No JSON wrapper — raw bytes only.
+No JSON wrapper, raw bytes only.
 
 ## Bitstring wire format
 
@@ -157,12 +157,12 @@ const BIN_TYPES = {
 
 `BitWriter` and `BitReader` are internal helper classes used by `encodeBitstring` / `decodeBitstring`. They are not part of the public API.
 
-- `BitWriter.writeUint(value, nBits)` — write an unsigned integer using exactly `nBits` bits
-- `BitWriter.writeBytes(uint8Array)` — write raw bytes
-- `BitWriter.toUint8Array()` — prepend 0-padding to reach byte alignment, return the result
-- `BitReader.readUint(nBits)` — read an unsigned integer
-- `BitReader.readBytes(nBytes)` — read raw bytes
-- `BitReader.remaining` — number of bits left
+- `BitWriter.writeUint(value, nBits)`, write an unsigned integer using exactly `nBits` bits
+- `BitWriter.writeBytes(uint8Array)`, write raw bytes
+- `BitWriter.toUint8Array()`, prepend 0-padding to reach byte alignment, return the result
+- `BitReader.readUint(nBits)`, read an unsigned integer
+- `BitReader.readBytes(nBytes)`, read raw bytes
+- `BitReader.remaining`, number of bits left
 
 ## Incoming binary frame handling
 
@@ -196,3 +196,6 @@ The bitstring format is defined by `hivemind-websocket-client` (`serialization.p
 # Regenerate all test vectors (including bitstring)
 "/path/to/.venv/bin/python" test/generate_vectors.py
 ```
+
+---
+[← Encryption](encryption.md) · [Home](../readme.md) · [End-to-end →](e2e.md)
