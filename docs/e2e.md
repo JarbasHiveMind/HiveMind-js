@@ -3,8 +3,8 @@
 The unit tests (`test/*.test.js`) prove the crypto and protocol code byte-for-byte
 against Python-generated vectors. The end-to-end test goes one step further: it
 drives the **actual** client against a **real** `hivemind-core` hub over a real
-WebSocket, so the wire behaviour — handshake timing, framing, encryption, message
-dispatch — is exercised exactly as it would be against a production hub.
+WebSocket, so the wire behaviour, handshake timing, framing, encryption, message
+dispatch, is exercised exactly as it would be against a production hub.
 
 It lives in [`../test/e2e/`](../test/e2e/) and is hermetic: no external network,
 no fixed ports, no published registry.
@@ -12,7 +12,7 @@ no fixed ports, no published registry.
 ## How the hub is provided
 
 The hub is a genuine `hivemind-core` server, booted on an **in-process loopback
-transport** by [`hivescope`](https://github.com/JarbasHiveMind/hivescope) — the same
+transport** by [`hivescope`](https://github.com/JarbasHiveMind/hivescope), the same
 mechanism the HiveMind test harness uses. `loopback_hub.py`:
 
 1. builds a topology with one loopback master (`TopologyBuilder().add_master(use_loopback=True)`),
@@ -33,7 +33,7 @@ URL, name, key, password and an utterance. The driver:
 2. loads the real client from `static/js/hivemind.js` (override with
    `HIVEMIND_JS_PATH`),
 3. calls `connect(host, port, name, key, password)` and waits for `onHiveConnected`
-   — which only fires after the full Protocol V1 handshake (HELLO → HANDSHAKE →
+  , which only fires after the full Protocol V1 handshake (HELLO → HANDSHAKE →
    PBKDF2 key derivation → encrypted HELLO),
 4. calls `sendUtterance(...)` to emit an AES-GCM-encrypted `recognizer_loop:utterance`,
 5. exits `0` on success, `1` on any timeout/disconnect/send error.
@@ -62,3 +62,6 @@ alongside a Python test suite.
 
 CI runs it on every PR/push to `dev` and `master` via
 [`.github/workflows/e2e.yml`](../.github/workflows/e2e.yml).
+
+---
+[← Binary](binary.md) · [Home](../readme.md) · [Implementation Status →](TODO.md)

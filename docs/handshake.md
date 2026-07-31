@@ -1,6 +1,6 @@
 # HiveMind Handshake Protocol
 
-Protocol V1 uses a server-initiated handshake. `onHiveConnected` fires only after the handshake is fully complete — **not** on WebSocket `open`.
+Protocol V1 uses a server-initiated handshake. `onHiveConnected` fires only after the handshake is fully complete, **not** on WebSocket `open`.
 
 ## Full flow (password mode)
 
@@ -23,7 +23,7 @@ Client                                          Server
   |                                               |
   |  (derive session key on both sides)           |  (derive session key on both sides)
   |                                               |
-  |  HELLO {pubkey, session, site_id}  -->        |  (encrypted — handshake complete)
+  |  HELLO {pubkey, session, site_id}  -->        |  (encrypted, handshake complete)
   |                                               |
   |  <onHiveConnected fires here>                 |
   |                                               |
@@ -48,8 +48,8 @@ Client                                          Server
 ```
 
 Client should save:
-- `payload.pubkey` — server's public key (can be used to verify later)
-- `payload.node_id` — how the server refers to itself on the OVOS bus
+- `payload.pubkey`, server's public key (can be used to verify later)
+- `payload.node_id`, how the server refers to itself on the OVOS bus
 
 ### 2. Server sends HANDSHAKE (unencrypted)
 
@@ -72,11 +72,11 @@ Client should save:
 ```
 
 Key fields:
-- `password: true` — server has a password for this client; use `PasswordHandShake`
-- `preshared_key: true` — server has a pre-shared key (Protocol V0 fallback)
-- `handshake: false` — no handshake needed (server will accept unencrypted messages)
-- `crypto_required: true` — client MUST complete handshake or will be disconnected
-- `encodings` / `ciphers` — server's allowed options (client picks from these)
+- `password: true`, server has a password for this client; use `PasswordHandShake`
+- `preshared_key: true`, server has a pre-shared key (Protocol V0 fallback)
+- `handshake: false`, no handshake needed (server will accept unencrypted messages)
+- `crypto_required: true`, client MUST complete handshake or will be disconnected
+- `encodings` / `ciphers`, server's allowed options (client picks from these)
 
 ### 3. Client sends HANDSHAKE (unencrypted)
 
@@ -140,7 +140,7 @@ This is the last handshake message. After the server processes it, normal encryp
 ## PasswordHandShake (hSub protocol)
 
 Source: `poorman_handshake/poorman_handshake/symmetric/`
-JS implementation: `static/js/hivemind.js` — `PasswordHandShake` class
+JS implementation: `static/js/hivemind.js`, `PasswordHandShake` class
 
 ### hSub format
 
@@ -176,7 +176,7 @@ Extracts the IV from an hSub: `fromHex(hsub.slice(0, 16))`.
 
 #### `async matchHsub(hsub)` → `boolean`
 
-Recomputes the hSub using the embedded IV and compares. Returns `false` if the password doesn't match or the hSub length is out of range (48–80).
+Recomputes the hSub using the embedded IV and compares. Returns `false` if the password doesn't match or the hSub length is out of range (48-80).
 
 #### `async generateHandshake()` → `{envelope, iv}`
 
@@ -222,4 +222,7 @@ const serverKey = await server.deriveSecret();
 
 ## RSA handshake mode (alternative to password)
 
-If `password: false` in the server's HANDSHAKE but `handshake: true`, the server expects RSA key exchange instead. The JS client does not implement RSA mode — it requires password mode (`password: true`).
+If `password: false` in the server's HANDSHAKE but `handshake: true`, the server expects RSA key exchange instead. The JS client does not implement RSA mode, it requires password mode (`password: true`).
+
+---
+[← Protocol](protocol.md) · [Home](../readme.md) · [Encryption →](encryption.md)

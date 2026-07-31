@@ -22,10 +22,10 @@ Every message exchanged over the WebSocket (when not binarized) is a JSON object
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `msg_type` | string | Message type — see table below |
+| `msg_type` | string | Message type, see table below |
 | `payload` | object \| string \| null | Message body; content depends on `msg_type` |
 | `metadata` | object | Arbitrary key/value metadata attached to the message |
-| `route` | array | Hop list — each entry is `{source, targets}`; tracks message path through the hive |
+| `route` | array | Hop list, each entry is `{source, targets}`; tracks message path through the hive |
 | `node` | string \| null | Semi-unique node identifier of the sender node |
 | `target_site_id` | string \| null | Restrict delivery to a specific site (satellite location) |
 | `target_pubkey` | string \| null | Restrict delivery to a specific node identified by public key |
@@ -89,7 +89,7 @@ When `msg_type` is `"bus"`, the payload is an OVOS/Mycroft message:
 
 | Version | Features |
 |---------|----------|
-| 0 | JSON only, no handshake, no binary — pre-shared key only |
+| 0 | JSON only, no handshake, no binary, pre-shared key only |
 | 1 | Server-initiated handshake, negotiated cipher/encoding, PBKDF2 session keys |
 | 2 | Binary (binarized) message support |
 
@@ -164,3 +164,6 @@ See [handshake.md](./handshake.md) for full handshake flow details.
   "cipher": "AES-GCM"
 }
 ```
+
+---
+[Home](../readme.md) · [Handshake →](handshake.md)
