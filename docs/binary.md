@@ -61,7 +61,6 @@ The leading 1 bit (`pad marker`) terminates the byte-alignment padding. Bits are
 | 8 | `cascade` |
 | 9 | `ping` |
 | 10 | `rendezvous` |
-| 11 | `3rdparty` |
 | 12 | `bin` |
 
 ### Binary sub-types (`bin_type`)

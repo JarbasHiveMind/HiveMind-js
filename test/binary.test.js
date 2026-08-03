@@ -136,13 +136,17 @@ describe('Bitstring codec', () => {
         // (already covered by round-trip tests)
     });
 
-    test('MSG_TYPE_TO_INT covers all 13 known types', () => {
+    test('MSG_TYPE_TO_INT covers all 12 known types', () => {
         const expected = ['shake','bus','shared_bus','broadcast','propagate','escalate',
-                          'hello','query','cascade','ping','rendezvous','3rdparty','bin'];
+                          'hello','query','cascade','ping','rendezvous','bin'];
         for (const t of expected) {
             assert.ok(MSG_TYPE_TO_INT[t] !== undefined, `${t} must be in MSG_TYPE_TO_INT`);
         }
-        assert.equal(Object.keys(MSG_TYPE_TO_INT).length, 13);
+        assert.equal(Object.keys(MSG_TYPE_TO_INT).length, 12);
+    });
+
+    test('code 11 is unassigned and no type maps to it', () => {
+        assert.equal(Object.values(MSG_TYPE_TO_INT).includes(11), false);
     });
 
     test('BIN_TYPES.RAW_AUDIO === 1', () => {
