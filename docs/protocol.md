@@ -119,11 +119,12 @@ The `JarbasHiveMind` class in `static/js/hivemind.js` implements:
 | Feature | Supported |
 |---------|-----------|
 | Protocol V1 (server-initiated handshake) | Yes |
+| Protocol V3 (Noise, argon2id PSK derivation) | Yes, `_maxProtocolVersion` is 3 by default |
 | Password mode (`PasswordHandShake`) | Yes |
 | AES-GCM cipher | Yes |
 | JSON-HEX encoding | Yes |
 | RSA key exchange | No |
-| ChaCha20-Poly1305 cipher | No (not in Web Crypto) |
+| ChaCha20-Poly1305 cipher | Yes, via `@noble/ciphers` (Web Crypto has no ChaCha20) |
 | Binary / binarize mode | Yes |
 
 ## HANDSHAKE payload formats

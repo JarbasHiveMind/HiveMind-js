@@ -2,7 +2,7 @@
 
 ![logo](./hivemindjs.png)
 
-JavaScript client for HiveMind, Protocol V1. Runs in the browser and in Node.js 18+.
+JavaScript client for HiveMind, up to protocol v3 (Noise with argon2id PSK derivation). Runs in the browser and in Node.js 18+.
 
 Uses the native [Web Crypto API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API) (`crypto.subtle`) for X25519, SHA-256, HMAC and AES-GCM, plus [`@noble/ciphers`](https://github.com/paulmillr/noble-ciphers) and [`@noble/hashes`](https://github.com/paulmillr/noble-hashes) (pure-JS, audited, no WASM) for the two primitives Web Crypto lacks: **ChaCha20-Poly1305** (the default protocol-v3 Noise AEAD) and **argon2id** (the default PSK derivation). This gives HiveMind-js **full cipher parity with hivemind-core**, every registered Noise suite and PSK derivation. Node.js 18+; protocol v3 needs Node.js 20+ (Web Crypto X25519).
 
