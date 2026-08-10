@@ -66,7 +66,6 @@ Every message exchanged over the WebSocket (when not binarized) is a JSON object
 | `"cascade"` | `CASCADE` | master→slaves | Like propagate, expects responses from all nodes |
 | `"ping"` | `PING` | both | Like cascade, used for network topology mapping |
 | `"rendezvous"` | `RENDEZVOUS` | both | Reserved for rendezvous-nodes |
-| `"3rdparty"` | `THIRDPRTY` | both | User-land message with no defined handling |
 | `"bin"` | `BINARY` | both | Binary data container (payload is raw bytes, not JSON) |
 
 ## BUS payload format

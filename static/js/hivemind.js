@@ -135,7 +135,7 @@ async function decryptAesGcmBin(keyBytes, frame) {
 const MSG_TYPE_TO_INT = {
     shake: 0, bus: 1, shared_bus: 2, broadcast: 3, propagate: 4,
     escalate: 5, hello: 6, query: 7, cascade: 8, ping: 9,
-    rendezvous: 10, '3rdparty': 11, bin: 12
+    rendezvous: 10, bin: 12
 };
 
 const INT_TO_MSG_TYPE = Object.fromEntries(
@@ -300,7 +300,12 @@ async function decodeBitstring(bytes) {
     }
 
     const msgTypeInt = r.readUint(5);
-    const msgType = INT_TO_MSG_TYPE[msgTypeInt] || '3rdparty';
+    const msgType = INT_TO_MSG_TYPE[msgTypeInt];
+    if (msgType === undefined) {
+        // WIRE-1 §4.2: reject an unassigned message-type code as malformed.
+        // Code 11 was '3rdparty', which is removed; do not reuse it.
+        throw new Error(`decodeBitstring: unassigned message type code ${msgTypeInt}`);
+    }
     const compressed = r.readBit() === 1;
 
     const metaLen = r.readUint(8);
