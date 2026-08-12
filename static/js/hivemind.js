@@ -991,7 +991,20 @@ JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, pa
     this._noiseTransport = null;
 
     var authToken = btoa(username + ':' + accessKey);
-    var url = 'ws://' + host + ':' + port + '?authorization=' + authToken;
+    // A hardcoded 'ws://' cannot reach any hub behind TLS, and a browser on an
+    // HTTPS page refuses a ws:// socket outright as mixed content — so the
+    // client could not be used from the one place it exists for. `host` may
+    // therefore carry its own scheme ('wss://hive.example.org'); otherwise
+    // `options.ssl` picks one, defaulting to plain ws for local hubs.
+    var scheme;
+    if (/^wss?:\/\//.test(host)) {
+        scheme = '';
+    } else if (options.ssl) {
+        scheme = 'wss://';
+    } else {
+        scheme = 'ws://';
+    }
+    var url = scheme + host + ':' + port + '?authorization=' + authToken;
     this.ws = new WebSocket(url);
     this.ws.onopen    = this._onWsOpen.bind(this);
     this.ws.onmessage = this._onWsMessage.bind(this);
@@ -1350,7 +1363,15 @@ JarbasHiveMind.prototype._handleUserMessage = function (msg) {
     if (msgType === 'bus') {
         var mycMsg = msg.payload;
         this.onMycroftMessage(mycMsg);
-        if (mycMsg && mycMsg.type === 'speak') {
+        // OVOS-PIPELINE-1 §9.6 renamed the spoken-response topic to
+        // 'ovos.utterance.speak'. Python clients never noticed, because
+        // ovos-bus-client rewrites the legacy name for its subscribers; this
+        // client has no such shim, so matching only 'speak' meant
+        // onMycroftSpeak never fired against a current hub. Both names are
+        // accepted: the spec one is what hubs emit now, the legacy one keeps
+        // older hubs working.
+        if (mycMsg && (mycMsg.type === 'ovos.utterance.speak'
+                       || mycMsg.type === 'speak')) {
             this.onMycroftSpeak(mycMsg);
         }
     } else if (msgType === 'broadcast') {
