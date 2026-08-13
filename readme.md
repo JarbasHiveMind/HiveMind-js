@@ -114,7 +114,7 @@ is used; otherwise the legacy Protocol V1 handshake runs.
 |-------|------|-------------|
 | `psk` | `Uint8Array` or hex string | Optional pre-provisioned 32-byte Noise PSK. Normally unnecessary, a `password` is stretched with argon2id on-device to the same value; provide `psk` only to skip derivation or when no password is configured |
 | `serverNoiseKey` | hex string | Pinned server static X25519 public key; enables `KKpsk0` and aborts on mismatch (TOFU pinning) |
-| `noiseStaticKey` | `Uint8Array` or hex string | This node's static X25519 private key, persist it to keep a stable node identity across connections |
+| `noiseStaticKey` | `Uint8Array` or hex string | This node's static X25519 private key. Optional — when omitted, the client generates one and remembers it for you, keyed by `host`/`port`/`accessKey`: `localStorage` in the browser, an in-memory process-lifetime cache in Node.js (Node has no `localStorage`, and this library will not silently write key material to a file in your home directory — pass this option yourself if you need a Node process identity to survive a restart). An explicit value here always wins over anything stored, and is itself persisted for later connects. This matters because the server pins a client's static key on first use: regenerating it every connection gets the client locked out |
 | `maxProtocolVersion` | number | Cap the negotiated protocol version (default `3`) |
 | `ssl` | boolean | Connect with `wss://` instead of `ws://` for a bare `host` (default `false`). A browser on an HTTPS page cannot open a `ws://` socket at all, so any hub reached from a hosted page needs this or a `wss://` host |
 
@@ -138,6 +138,7 @@ Override these on your instance before calling `connect()`:
 |------|---------------|
 | `onHiveConnected()` | Handshake complete, safe to call `sendMessage` |
 | `onHiveDisconnected()` | WebSocket closed |
+| `onHiveError(err)` | The hub refused or aborted the connection, e.g. the WebSocket closed before the handshake reached READY. A close with code `1008` means the hub rejected the credentials — treated as fatal. Fires before `onHiveDisconnected()` |
 | `onMycroftMessage(msg)` | Any `bus` message received |
 | `onMycroftSpeak(msg)` | `bus` message with type `speak` |
 | `onHiveBroadcast(msg)` | `broadcast` message received |
