@@ -923,6 +923,64 @@ const States = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Noise static-key persistence (HIVEMIND-CRYPTO-1 §3.4.5: the server pins a
+// client's static key on first use, so re-generating it on every connect()
+// locks the client out after the very first successful handshake).
+//
+// Browser: localStorage, keyed by host/port/accessKey so unrelated hubs or
+// unrelated access keys on the same origin never collide, and never crash
+// the connection when storage is unavailable or throws (private mode,
+// disabled storage, quota).
+//
+// Node.js: there is no localStorage. We keep an in-memory, process-lifetime
+// cache instead of silently writing a file into the user's home directory —
+// a background client library persisting secret key material to disk without
+// being asked is a bigger surprise than "the key is fresh every process
+// restart". Callers that want a stable node identity across Node process
+// restarts must pass options.noiseStaticKey themselves (loaded from wherever
+// they choose to keep it).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const _nodeNoiseStaticKeyCache = new Map(); // storageKey -> Uint8Array(32), process lifetime only
+
+function _hasLocalStorage() {
+    try {
+        return typeof localStorage !== 'undefined' && localStorage !== null;
+    } catch (e) {
+        return false;
+    }
+}
+
+function _noiseStorageKey(host, port, accessKey) {
+    return 'hivemind:noise-static-key:' + host + ':' + port + ':' + accessKey;
+}
+
+function _loadPersistedNoiseStaticKey(key) {
+    if (_hasLocalStorage()) {
+        try {
+            const hex = localStorage.getItem(key);
+            return hex ? fromHex(hex) : null;
+        } catch (e) {
+            console.warn('HiveMind: localStorage unavailable, cannot load persisted Noise static key', e);
+            return null;
+        }
+    }
+    return _nodeNoiseStaticKeyCache.has(key) ? _nodeNoiseStaticKeyCache.get(key) : null;
+}
+
+function _persistNoiseStaticKey(key, priv) {
+    if (_hasLocalStorage()) {
+        try {
+            localStorage.setItem(key, toHex(priv));
+        } catch (e) {
+            console.warn('HiveMind: localStorage unavailable, Noise static key will not persist across reloads', e);
+        }
+        return;
+    }
+    _nodeNoiseStaticKeyCache.set(key, priv);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // JarbasHiveMind — Protocol V1 client
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -963,7 +1021,16 @@ function JarbasHiveMind() {
 //   serverNoiseKey:     hex — pinned server static X25519 public key; enables the
 //                       KKpsk0 pattern and aborts on key mismatch (TOFU pinning).
 //   noiseStaticKey:     32-byte Uint8Array or hex — this node's static X25519
-//                       private key (persist it to keep a stable node identity).
+//                       private key. Optional: when omitted, the client
+//                       reuses (or generates and then persists) a key keyed
+//                       by host/port/accessKey — in localStorage in the
+//                       browser, in an in-memory process-lifetime cache in
+//                       Node.js. An explicitly supplied value always wins
+//                       over anything stored, and is persisted for later
+//                       connects too. This matters because the server pins
+//                       a client's static key on first use (HIVEMIND-CRYPTO-1
+//                       §3.4.5): re-generating it every connect() locks the
+//                       client out after the first successful handshake.
 //   maxProtocolVersion: cap the negotiated protocol version (default 3).
 JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, password, options) {
     options = options || {};
@@ -982,6 +1049,22 @@ JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, pa
     this._serverNoiseKey = options.serverNoiseKey || null;
     this._noiseStaticKey = typeof options.noiseStaticKey === 'string'
         ? fromHex(options.noiseStaticKey) : (options.noiseStaticKey || null);
+    // Persist/reuse the Noise static key so the client doesn't re-key (and
+    // get itself locked out) on every connect(). An explicit option always
+    // wins and gets persisted too, so future connects without the option
+    // still pick it up.
+    var noiseStorageKey = _noiseStorageKey(host, port, accessKey);
+    if (this._noiseStaticKey) {
+        _persistNoiseStaticKey(noiseStorageKey, this._noiseStaticKey);
+    } else {
+        var storedNoiseStaticKey = _loadPersistedNoiseStaticKey(noiseStorageKey);
+        if (storedNoiseStaticKey) {
+            this._noiseStaticKey = storedNoiseStaticKey;
+        } else {
+            this._noiseStaticKey = x25519GeneratePrivate();
+            _persistNoiseStaticKey(noiseStorageKey, this._noiseStaticKey);
+        }
+    }
     // fixed ephemeral key — deterministic interop tests ONLY, never production
     this._noiseEphemeralKey = typeof options._noiseEphemeralKey === 'string'
         ? fromHex(options._noiseEphemeralKey) : (options._noiseEphemeralKey || null);
@@ -1062,6 +1145,7 @@ JarbasHiveMind.prototype.sendAudioB64 = async function (base64) {
 
 JarbasHiveMind.prototype.onHiveConnected    = function ()    { console.log('HiveMind connected'); };
 JarbasHiveMind.prototype.onHiveDisconnected = function ()    { console.log('HiveMind disconnected'); };
+JarbasHiveMind.prototype.onHiveError        = function (err) { console.error('HiveMind error:', err); };
 JarbasHiveMind.prototype.onMycroftMessage   = function (msg) { console.log('mycroft message:', msg); };
 JarbasHiveMind.prototype.onMycroftSpeak     = function (msg) { console.log('mycroft speak:', msg && msg.data && msg.data.utterance); };
 JarbasHiveMind.prototype.onHiveBroadcast    = function (msg) { };
@@ -1112,11 +1196,30 @@ JarbasHiveMind.prototype._onWsMessage = async function (event) {
     }
 };
 
-JarbasHiveMind.prototype._onWsClose = function () {
+JarbasHiveMind.prototype._onWsClose = function (event) {
+    var wasReady = this._state === States.READY;
+    var closeCode = event && event.code;
     this._state = States.DISCONNECTED;
     this._sessionKey = null;
     this._noiseHandshake = null;
     this._noiseTransport = null;
+    if (!wasReady) {
+        // The socket closed before the handshake completed: the hub refused
+        // or aborted the connection. Without this, callers see "connected"
+        // (from a premature log) and then silence, with no error and no
+        // onHiveDisconnected reason to explain it.
+        var reason = (event && event.reason) ? (': ' + event.reason) : '';
+        var message;
+        if (closeCode === 1008) {
+            // HIVEMIND-WIRE-1: 1008 (Policy Violation) means the server
+            // rejected the credentials/handshake — fatal, not a transient drop.
+            message = 'HiveMind connection refused: credentials rejected by server (close code 1008)' + reason;
+        } else {
+            message = 'HiveMind connection refused before handshake completed (close code ' +
+                (closeCode !== undefined ? closeCode : 'unknown') + ')' + reason;
+        }
+        this.onHiveError(new Error(message));
+    }
     this.onHiveDisconnected();
 };
 
