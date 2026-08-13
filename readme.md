@@ -80,6 +80,7 @@ hivemind.onHiveConnected = async () => {
 };
 
 hivemind.onMycroftSpeak = (msg) => console.log('speak:', msg.data.utterance);
+// fires for the spec topic 'ovos.utterance.speak' and the legacy 'speak'
 
 // connect(host, port, username, accessKey, password)
 hivemind.connect('127.0.0.1', 5678, 'HivemindNode', 'ivf1NQSkQNogWYyr', 'mypassword');
@@ -100,7 +101,7 @@ is used; otherwise the legacy Protocol V1 handshake runs.
 
 | Argument | Type | Description |
 |----------|------|-------------|
-| `host` | string | Server hostname or IP |
+| `host` | string | Server hostname or IP. May carry its own scheme (`wss://hive.example.org`); a bare host uses `options.ssl` |
 | `port` | number | Server port (default HiveMind port: 5678) |
 | `username` | string | Client name / user-agent string |
 | `accessKey` | string | Access key issued to the client |
@@ -115,6 +116,7 @@ is used; otherwise the legacy Protocol V1 handshake runs.
 | `serverNoiseKey` | hex string | Pinned server static X25519 public key; enables `KKpsk0` and aborts on mismatch (TOFU pinning) |
 | `noiseStaticKey` | `Uint8Array` or hex string | This node's static X25519 private key, persist it to keep a stable node identity across connections |
 | `maxProtocolVersion` | number | Cap the negotiated protocol version (default `3`) |
+| `ssl` | boolean | Connect with `wss://` instead of `ws://` for a bare `host` (default `false`). A browser on an HTTPS page cannot open a `ws://` socket at all, so any hub reached from a hosted page needs this or a `wss://` host |
 
 Returns the raw `WebSocket` instance.
 

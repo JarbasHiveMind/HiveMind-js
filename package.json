@@ -13,17 +13,18 @@
     "url": "https://github.com/JarbasHiveMind/HiveMind-js/issues"
   },
   "main": "static/js/hivemind.js",
-  "module": "static/js/hivemind.js",
+  "module": "static/js/hivemind.mjs",
   "exports": {
     ".": {
       "require": "./static/js/hivemind.js",
-      "import": "./static/js/hivemind.js",
+      "import": "./static/js/hivemind.mjs",
       "default": "./static/js/hivemind.js"
     }
   },
   "browser": "static/js/hivemind.js",
   "files": [
     "static/js/hivemind.js",
+    "static/js/hivemind.mjs",
     "docs",
     "readme.md",
     "LICENSE"
