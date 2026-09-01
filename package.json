@@ -34,7 +34,7 @@
     "test:e2e": "python3 test/e2e/loopback_hub.py"
   },
   "devDependencies": {
-    "ws": "^8.18.0"
+    "ws": "^8.21.3"
   },
   "keywords": [
     "hivemind",
@@ -56,7 +56,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@noble/ciphers": "^2.2.0",
-    "@noble/hashes": "^2.2.0"
+    "@noble/ciphers": "^2.4.0",
+    "@noble/hashes": "^2.4.0"
   }
 }

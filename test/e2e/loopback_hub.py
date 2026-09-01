@@ -35,7 +35,7 @@ REPO_ROOT = HERE.parent.parent
 DRIVER = HERE / "js_e2e_driver.mjs"
 
 NAME = "js-sat"
-PASSWORD = "js-password"
+PASSWORD = "correct-horse-battery-hivemind-js-e2e"
 UTTERANCE = "hello from javascript"
 
 
