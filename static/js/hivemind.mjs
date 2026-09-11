@@ -20,7 +20,8 @@ export const {
     derivePskPBKDF2, derivePskArgon2,
     noiseHkdf, x25519, x25519PublicFromPrivate,
     NOISE_PATTERN_XX, NOISE_PATTERN_KK,
-    NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM, NOISE_SUITES_JS
+    NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM, NOISE_SUITES_JS,
+    HM_VERSION, HM_LEGACY_HUB_REMOVAL_VERSION
 } = mod;
 
 export default mod;

@@ -70,7 +70,7 @@ async function buildServerHandshakeResponse(password, clientHsMsg) {
 // Full handshake without binarize (standard text path)
 async function fullHandshake(password) {
     const hm = new JarbasHiveMind();
-    hm.connect('localhost', 5678, 'user', 'access-key', password);
+    hm.connect('localhost', 5678, 'user', 'access-key', password, { legacyHub: true });
     const ws = _lastMockWs;
     ws.triggerOpen();
     await ws.inject({ msg_type: 'hello', payload: { pubkey: 'srv-pub', node_id: 'node-1', peer: 'master:0.0.0.0' } });
@@ -85,7 +85,7 @@ async function fullHandshake(password) {
 // Full handshake with binarize:true (binary frame path)
 async function fullHandshakeBinarize(password) {
     const hm = new JarbasHiveMind();
-    hm.connect('localhost', 5678, 'user', 'access-key', password);
+    hm.connect('localhost', 5678, 'user', 'access-key', password, { legacyHub: true });
     const ws = _lastMockWs;
     ws.triggerOpen();
     await ws.inject({ msg_type: 'hello', payload: { pubkey: 'srv-pub', node_id: 'node-1', peer: 'master:0.0.0.0' } });
@@ -193,7 +193,7 @@ describe('Binarize handshake + messaging', () => {
 
     test('client sends binarize:true when server advertises binarize:true', async () => {
         const hm = new JarbasHiveMind();
-        hm.connect('localhost', 5678, 'user', 'key', 'pw');
+        hm.connect('localhost', 5678, 'user', 'key', 'pw', { legacyHub: true });
         const ws = _lastMockWs;
         ws.triggerOpen();
         await ws.inject({ msg_type: 'hello', payload: {} });
@@ -204,7 +204,7 @@ describe('Binarize handshake + messaging', () => {
 
     test('client sends binarize:false when server advertises binarize:false', async () => {
         const hm = new JarbasHiveMind();
-        hm.connect('localhost', 5678, 'user', 'key', 'pw');
+        hm.connect('localhost', 5678, 'user', 'key', 'pw', { legacyHub: true });
         const ws = _lastMockWs;
         ws.triggerOpen();
         await ws.inject({ msg_type: 'hello', payload: {} });

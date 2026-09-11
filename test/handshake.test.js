@@ -69,7 +69,7 @@ async function buildServerHandshakeResponse(password, clientHsMsg) {
 // Run a full handshake from ws.open → READY and return the mockWs + hivemind.
 async function fullHandshake(password) {
     const hm = new JarbasHiveMind();
-    hm.connect('localhost', 5678, 'user', 'access-key', password);
+    hm.connect('localhost', 5678, 'user', 'access-key', password, { legacyHub: true });
     const ws = _lastMockWs;
 
     // 1. WS open
@@ -103,7 +103,7 @@ describe('Connection state machine', () => {
         let called = false;
         const hm = new JarbasHiveMind();
         hm.onHiveConnected = () => { called = true; };
-        hm.connect('localhost', 5678, 'user', 'key', 'pw');
+        hm.connect('localhost', 5678, 'user', 'key', 'pw', { legacyHub: true });
         _lastMockWs.triggerOpen();
         assert.equal(called, false);
         assert.equal(hm._state, States.CONNECTING);
@@ -111,7 +111,7 @@ describe('Connection state machine', () => {
 
     test('state advances to HELLO_RECEIVED after server HELLO', async () => {
         const hm = new JarbasHiveMind();
-        hm.connect('localhost', 5678, 'user', 'key', 'pw');
+        hm.connect('localhost', 5678, 'user', 'key', 'pw', { legacyHub: true });
         const ws = _lastMockWs;
         ws.triggerOpen();
         await ws.inject({ msg_type: 'hello', payload: { pubkey: 'pk', node_id: 'n1', peer: 'p' } });
@@ -120,7 +120,7 @@ describe('Connection state machine', () => {
 
     test('state advances to HANDSHAKE_SENT after server HANDSHAKE request', async () => {
         const hm = new JarbasHiveMind();
-        hm.connect('localhost', 5678, 'user', 'key', 'pw');
+        hm.connect('localhost', 5678, 'user', 'key', 'pw', { legacyHub: true });
         const ws = _lastMockWs;
         ws.triggerOpen();
         await ws.inject({ msg_type: 'hello', payload: { pubkey: 'pk', node_id: 'n1', peer: 'p' } });
@@ -130,7 +130,7 @@ describe('Connection state machine', () => {
 
     test('client sends HANDSHAKE with envelope + encodings + ciphers', async () => {
         const hm = new JarbasHiveMind();
-        hm.connect('localhost', 5678, 'user', 'key', 'testpw');
+        hm.connect('localhost', 5678, 'user', 'key', 'testpw', { legacyHub: true });
         const ws = _lastMockWs;
         ws.triggerOpen();
         await ws.inject({ msg_type: 'hello', payload: {} });
@@ -149,7 +149,7 @@ describe('Connection state machine', () => {
     test('client sends encrypted HELLO after server HANDSHAKE response', async () => {
         const password = 'hello-test-pw';
         const hm = new JarbasHiveMind();
-        hm.connect('localhost', 5678, 'user', 'key', password);
+        hm.connect('localhost', 5678, 'user', 'key', password, { legacyHub: true });
         const ws = _lastMockWs;
         ws.triggerOpen();
         await ws.inject({ msg_type: 'hello', payload: {} });
@@ -171,7 +171,7 @@ describe('Connection state machine', () => {
         const password = 'once-test-pw';
         const hm = new JarbasHiveMind();
         hm.onHiveConnected = () => { callCount++; };
-        hm.connect('localhost', 5678, 'user', 'key', password);
+        hm.connect('localhost', 5678, 'user', 'key', password, { legacyHub: true });
         const ws = _lastMockWs;
         ws.triggerOpen();
         await ws.inject({ msg_type: 'hello', payload: {} });
@@ -185,7 +185,7 @@ describe('Connection state machine', () => {
 
     test('sendMessage before READY is rejected', async () => {
         const hm = new JarbasHiveMind();
-        hm.connect('localhost', 5678, 'user', 'key', 'pw');
+        hm.connect('localhost', 5678, 'user', 'key', 'pw', { legacyHub: true });
         _lastMockWs.triggerOpen();
         await assert.rejects(
             () => hm.sendMessage({ msg_type: 'bus', payload: {} }),
