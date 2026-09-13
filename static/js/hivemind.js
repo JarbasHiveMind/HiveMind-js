@@ -573,9 +573,56 @@ class NoiseCipherState {
         this.suite = suite || NOISE_SUITE_AESGCM;
         this.k = null;      // Uint8Array(32) or null (no key yet)
         this.n = 0n;        // 64-bit message counter
+        // One operation at a time per direction. The AES-GCM path awaits Web
+        // Crypto between reading n and advancing it, so two concurrent calls
+        // would otherwise use the same nonce (HIVEMIND-CRYPTO-1 §3.5).
+        // What the queue guarantees: operations on this state run one at a
+        // time in call order, each uses the next nonce, and their promises
+        // settle in that order. It does not order what a caller does after a
+        // promise settles, so it gives no application delivery order.
+        this._tail = Promise.resolve();
+        this._pendingSends = 0;
+        this._aesKey = null;     // CryptoKey imported once for this.k
+        this._aesKeyFor = null;  // the key bytes _aesKey was imported from
     }
 
-    initializeKey(k) { this.k = k; this.n = 0n; }
+    _serialize(op) {
+        const run = this._tail.then(op);
+        this._tail = run.catch(() => {});
+        return run;
+    }
+
+    encryptWithAd(ad, plaintext) {
+        // Bound the sends waiting on this state, so a caller that sends faster
+        // than Web Crypto completes gets an error instead of an unbounded heap
+        // and an ever longer delay. Receives are not bounded here: dropping a
+        // received frame would break the strict nonce sequence.
+        if (this._pendingSends >= NoiseCipherState.MAX_PENDING_SENDS) {
+            return Promise.reject(new Error('Noise send queue full'));
+        }
+        this._pendingSends += 1;
+        const run = this._serialize(() => this._encryptWithAdNow(ad, plaintext));
+        const done = () => { this._pendingSends -= 1; };
+        run.then(done, done);
+        return run;
+    }
+
+    decryptWithAd(ad, ciphertext) {
+        return this._serialize(() => this._decryptWithAdNow(ad, ciphertext));
+    }
+
+    async _aesGcmKey() {
+        const k = this.k;
+        if (this._aesKey === null || this._aesKeyFor !== k) {
+            const key = await crypto.subtle.importKey('raw', k, 'AES-GCM', false, ['encrypt', 'decrypt']);
+            // keep it only if the key did not change while the import ran
+            if (this.k === k) { this._aesKey = key; this._aesKeyFor = k; }
+            return key;
+        }
+        return this._aesKey;
+    }
+
+    initializeKey(k) { this.k = k; this.n = 0n; this._aesKey = null; this._aesKeyFor = null; }
     hasKey() { return this.k !== null; }
 
     _nonce() {
@@ -591,7 +638,7 @@ class NoiseCipherState {
         return nonce;
     }
 
-    async encryptWithAd(ad, plaintext) {
+    async _encryptWithAdNow(ad, plaintext) {
         if (!this.hasKey()) return plaintext;
         const nonce = this._nonce();
         const aad = ad && ad.length ? ad : undefined;
@@ -599,7 +646,7 @@ class NoiseCipherState {
         if (this.suite === NOISE_SUITE_CHACHA) {
             ct = _chacha20poly1305(this.k, nonce, aad).encrypt(plaintext); // ct || 16-byte tag
         } else {
-            const key = await crypto.subtle.importKey('raw', this.k, 'AES-GCM', false, ['encrypt']);
+            const key = await this._aesGcmKey();
             const params = { name: 'AES-GCM', iv: nonce, tagLength: 128 };
             if (aad) params.additionalData = aad;
             ct = new Uint8Array(await crypto.subtle.encrypt(params, key, plaintext)); // ct || tag
@@ -608,7 +655,7 @@ class NoiseCipherState {
         return ct;
     }
 
-    async decryptWithAd(ad, ciphertext) {
+    async _decryptWithAdNow(ad, ciphertext) {
         if (!this.hasKey()) return ciphertext;
         const nonce = this._nonce();
         const aad = ad && ad.length ? ad : undefined;
@@ -618,7 +665,7 @@ class NoiseCipherState {
         if (this.suite === NOISE_SUITE_CHACHA) {
             pt = _chacha20poly1305(this.k, nonce, aad).decrypt(ciphertext);
         } else {
-            const key = await crypto.subtle.importKey('raw', this.k, 'AES-GCM', false, ['decrypt']);
+            const key = await this._aesGcmKey();
             const params = { name: 'AES-GCM', iv: nonce, tagLength: 128 };
             if (aad) params.additionalData = aad;
             pt = new Uint8Array(await crypto.subtle.decrypt(params, key, ciphertext));
@@ -627,6 +674,10 @@ class NoiseCipherState {
         return pt;
     }
 }
+
+// Sends that may wait on one CipherState at a time. Past this, encryptWithAd
+// rejects with "Noise send queue full" so the caller can slow down.
+NoiseCipherState.MAX_PENDING_SENDS = 1024;
 
 // ── Noise SymmetricState ──────────────────────────────────────────────────────
 
