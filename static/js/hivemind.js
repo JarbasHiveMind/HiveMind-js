@@ -449,18 +449,25 @@ PasswordHandShake.prototype.deriveSecret = async function () {
 // (see the readme "Browser build" note). Both are pure-JS, audited (@noble by
 // Paul Miller). When absent (a minimal browser deployment that skipped the
 // bundle) the client degrades to the Web-Crypto-only AES-GCM + PBKDF2 subset.
-let _chacha20poly1305 = null;
-let _argon2id = null;
-(function _loadNoble() {
-    const g = (typeof globalThis !== 'undefined' && globalThis.HiveMindNoble) || null;
-    if (g) { _chacha20poly1305 = g.chacha20poly1305 || null; _argon2id = g.argon2id || null; }
-    if ((!_chacha20poly1305 || !_argon2id) && typeof require === 'function') {
-        try {
-            if (!_chacha20poly1305) _chacha20poly1305 = require('@noble/ciphers/chacha.js').chacha20poly1305;
-            if (!_argon2id) _argon2id = require('@noble/hashes/argon2.js').argon2id;
-        } catch (_) { /* optional — see note above */ }
+//
+// The global is read on every use, not once at script load. A page loads this
+// file as a classic script, and a module script that imports @noble runs after
+// it, so a load-time read always sees nothing in the browser.
+let _requiredNoble = null;
+function _noble() {
+    const g = (typeof globalThis !== 'undefined' && globalThis.HiveMindNoble) || {};
+    if (_requiredNoble === null) {
+        _requiredNoble = {};
+        if (typeof require === 'function') {
+            try { _requiredNoble.chacha20poly1305 = require('@noble/ciphers/chacha.js').chacha20poly1305; } catch (_) { /* optional */ }
+            try { _requiredNoble.argon2id = require('@noble/hashes/argon2.js').argon2id; } catch (_) { /* optional */ }
+        }
     }
-})();
+    return {
+        chacha20poly1305: g.chacha20poly1305 || _requiredNoble.chacha20poly1305 || null,
+        argon2id: g.argon2id || _requiredNoble.argon2id || null
+    };
+}
 
 const NOISE_PATTERN_XX = 'XXpsk2';
 const NOISE_PATTERN_KK = 'KKpsk0';
@@ -470,9 +477,12 @@ const NOISE_SUITE_AESGCM = '25519_AESGCM_SHA256';     // Web-Crypto-native fallb
 // suites this client can run, in PREFERENCE order (matching the Python client:
 // ChaCha20-Poly1305 first, AES-GCM for Web-Crypto-only situations). ChaCha is
 // only offered when @noble/ciphers is available; AES-GCM is always available.
-const NOISE_SUITES_JS = (_chacha20poly1305
-    ? [NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM]
-    : [NOISE_SUITE_AESGCM]);
+// Computed on each call, for the same reason as _noble().
+function noiseSuitesJs() {
+    return _noble().chacha20poly1305
+        ? [NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM]
+        : [NOISE_SUITE_AESGCM];
+}
 
 // transport frame markers (first plaintext byte) — must match
 // hivemind_bus_client.noise._FRAME_JSON / _FRAME_BINARY
@@ -644,7 +654,7 @@ class NoiseCipherState {
         const aad = ad && ad.length ? ad : undefined;
         let ct;
         if (this.suite === NOISE_SUITE_CHACHA) {
-            ct = _chacha20poly1305(this.k, nonce, aad).encrypt(plaintext); // ct || 16-byte tag
+            ct = _noble().chacha20poly1305(this.k, nonce, aad).encrypt(plaintext); // ct || 16-byte tag
         } else {
             const key = await this._aesGcmKey();
             const params = { name: 'AES-GCM', iv: nonce, tagLength: 128 };
@@ -663,7 +673,7 @@ class NoiseCipherState {
         // and a failed message MUST NOT be retried under another nonce (§3.4.5)
         let pt;
         if (this.suite === NOISE_SUITE_CHACHA) {
-            pt = _chacha20poly1305(this.k, nonce, aad).decrypt(ciphertext);
+            pt = _noble().chacha20poly1305(this.k, nonce, aad).decrypt(ciphertext);
         } else {
             const key = await this._aesGcmKey();
             const params = { name: 'AES-GCM', iv: nonce, tagLength: 128 };
@@ -753,7 +763,7 @@ class NoiseHandshake {
         const hs = new NoiseHandshake();
         hs.pattern = opts.pattern;
         hs.suite = opts.suite;
-        if (NOISE_SUITES_JS.indexOf(hs.suite) === -1) {
+        if (noiseSuitesJs().indexOf(hs.suite) === -1) {
             throw new Error('unsupported Noise suite: ' + hs.suite);
         }
         const script = NOISE_MESSAGE_PATTERNS[hs.pattern];
@@ -914,7 +924,7 @@ class NoiseTransport {
 function selectNoiseOptions(serverPatterns, serverSuites, pinnedRemoteKey) {
     // walk OUR preference-ordered list (ChaCha first) so the default suite wins
     // whenever both peers support it, regardless of the server's list order
-    const suite = NOISE_SUITES_JS.find(s => (serverSuites || []).indexOf(s) !== -1);
+    const suite = noiseSuitesJs().find(s => (serverSuites || []).indexOf(s) !== -1);
     if (!suite) return null;
     if (pinnedRemoteKey && (serverPatterns || []).indexOf(NOISE_PATTERN_KK) !== -1) {
         return { pattern: NOISE_PATTERN_KK, suite };
@@ -944,12 +954,13 @@ function buildNoisePrologue(helloPayload, handshakePayload, protocolName) {
 // server-side configuration. Requires @noble/hashes (bundled in Node; in the
 // browser expose it via globalThis.HiveMindNoble — see the readme).
 async function derivePskArgon2(password, nodeId) {
-    if (!_argon2id) {
+    const argon2id = _noble().argon2id;
+    if (!argon2id) {
         throw new Error('argon2id unavailable: @noble/hashes not loaded ' +
             '(browser bundle must expose globalThis.HiveMindNoble.argon2id)');
     }
     const salt = await sha256(new TextEncoder().encode(nodeId || ''));
-    return _argon2id(new TextEncoder().encode(password), salt,
+    return argon2id(new TextEncoder().encode(password), salt,
         { t: 3, m: 64 * 1024, p: 1, dkLen: 32 });
 }
 
@@ -1412,7 +1423,7 @@ JarbasHiveMind.prototype._resolveNoisePsk = async function (payload) {
     }
     // 3. password via argon2id — the server DEFAULT; derives the SAME PSK as
     //    core with no server-side configuration (needs @noble/hashes)
-    if (this._password && _argon2id) {
+    if (this._password && _noble().argon2id) {
         return await derivePskArgon2(this._password, this._serverNodeId || '');
     }
     // 4. no PSK and argon2id unavailable (minimal browser bundle without @noble)
@@ -1742,7 +1753,9 @@ if (typeof module !== 'undefined') {
         derivePskPBKDF2, derivePskArgon2,
         noiseHkdf, x25519, x25519PublicFromPrivate,
         NOISE_PATTERN_XX, NOISE_PATTERN_KK,
-        NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM, NOISE_SUITES_JS,
+        NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM, noiseSuitesJs,
+        // kept for callers of the old constant; now read at access time
+        get NOISE_SUITES_JS() { return noiseSuitesJs(); },
         HM_VERSION, HM_LEGACY_HUB_REMOVAL_VERSION
     };
 }
