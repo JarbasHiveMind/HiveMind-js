@@ -428,8 +428,10 @@ PasswordHandShake.prototype.deriveSecret = async function () {
 //   Noise_KKpsk0_25519_AESGCM_SHA256       (Web-Crypto-native fallback)
 //
 // ChaChaPoly is preferred (matching the Python client's preference order); the
-// suite is negotiated from the server's advertised list. When no mutual suite
-// exists the client falls back to the legacy (v0–v2) PasswordHandShake path.
+// suite is negotiated from the server's advertised list. When the server offers
+// v3 and no mutual suite exists, or no PSK can be derived, the client refuses
+// the connection (HIVEMIND-CRYPTO-1 §3: no legacy fallback). The legacy
+// (v0–v2) PasswordHandShake path runs only for a server that does not offer v3.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @noble crypto — the primitives Web Crypto lacks: ChaCha20-Poly1305 (AEAD for
@@ -1041,6 +1043,7 @@ JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, pa
     this._binarize = false;
     this._serverSupportsBinarize = false;
 
+    this._refusalReported = false;
     this._maxProtocolVersion = options.maxProtocolVersion !== undefined ? options.maxProtocolVersion : 3;
     this._psk = typeof options.psk === 'string' ? fromHex(options.psk) : (options.psk || null);
     if (this._psk && this._psk.length !== 32) {
@@ -1216,7 +1219,7 @@ JarbasHiveMind.prototype._onWsClose = function (event) {
     this._sessionKey = null;
     this._noiseHandshake = null;
     this._noiseTransport = null;
-    if (!wasReady) {
+    if (!wasReady && !this._refusalReported) {
         // The socket closed before the handshake completed: the hub refused
         // or aborted the connection. Without this, callers see "connected"
         // (from a premature log) and then silence, with no error and no
@@ -1274,26 +1277,31 @@ JarbasHiveMind.prototype._handleServerHandshake = async function (payload) {
         var psk = await this._resolveNoisePsk(payload);
         if (psk) {
             await this._startNoiseHandshake(payload, psk);
-        } else {
+        } else if (psk === null) {
+            // the server does not offer protocol v3, or this client is capped
+            // below it: the legacy handshake is the only one both can run
             await this._sendClientHandshake(payload);
         }
+        // false: the server offers v3 and this client cannot run it; the
+        // connection was refused in _resolveNoisePsk (HIVEMIND-CRYPTO-1 §3)
     }
 };
 
 // ── Protocol v3 (Noise) handshake ─────────────────────────────────────────────
 
-// Returns the 32-byte PSK when protocol v3 should be used, else null (legacy
-// v0-v2 path).  Version negotiation per HIVEMIND-WIRE-1 §2: both peers operate
-// at the highest protocol version both support.
+// Returns the 32-byte PSK when protocol v3 should be used, null when the server
+// does not offer v3 (legacy v0-v2 path), and false when the server offers v3
+// but this client cannot run it. In that case the connection is refused:
+// HIVEMIND-CRYPTO-1 §3 allows no legacy fallback once Noise is offered.
 JarbasHiveMind.prototype._resolveNoisePsk = async function (payload) {
     if (this._maxProtocolVersion < 3) return null;
     if ((payload.max_protocol_version || 1) < 3) return null;
     var noiseParams = payload.noise;
     if (!noiseParams || typeof noiseParams !== 'object') return null;
     if (!selectNoiseOptions(noiseParams.patterns, noiseParams.suites, this._serverNoiseKey)) {
-        // no mutual pattern/suite -> legacy handshake
-        console.warn('HiveMind: no mutual Noise pattern/suite, using legacy handshake');
-        return null;
+        this._refuseHandshake('the server offers protocol v3 (Noise) but there is ' +
+            'no mutual Noise pattern or suite.');
+        return false;
     }
     // 1. provisioned PSK — always interoperates (equals the server's
     //    argon2id(password, SHA-256(node_id)))
@@ -1311,13 +1319,24 @@ JarbasHiveMind.prototype._resolveNoisePsk = async function (payload) {
         return await derivePskArgon2(this._password, this._serverNodeId || '');
     }
     // 4. no PSK and argon2id unavailable (minimal browser bundle without @noble)
-    console.error(
-        'HiveMind: server offers protocol v3 (Noise) but no PSK can be derived. ' +
-        'argon2id is unavailable — load @noble/hashes (expose ' +
+    this._refuseHandshake(
+        'the server offers protocol v3 (Noise) but no PSK can be derived. ' +
+        'argon2id is unavailable: load @noble/hashes (expose ' +
         'globalThis.HiveMindNoble.argon2id in the browser) or pass ' +
-        'connect(..., { psk }) with a 32-byte provisioned PSK. ' +
-        'Falling back to the legacy handshake.');
-    return null;
+        'connect(..., { psk }) with a 32-byte provisioned PSK.');
+    return false;
+};
+
+// The server offers protocol v3 and this client cannot run it. Refuse the
+// connection with one clear error instead of sending the legacy handshake
+// (HIVEMIND-CRYPTO-1 §3: no cleartext or legacy fallback).
+JarbasHiveMind.prototype._refuseHandshake = function (reason) {
+    var message = 'HiveMind connection refused by this client: ' + reason +
+        ' No legacy handshake is sent (HIVEMIND-CRYPTO-1 §3).';
+    console.error(message);
+    this._refusalReported = true;
+    this.onHiveError(new Error(message));
+    this._abortNoise(reason);
 };
 
 // §3.4.3 step 3: select pattern/suite, bind the prologue, send Noise message 1
