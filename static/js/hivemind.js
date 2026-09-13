@@ -9,6 +9,16 @@
 // Byte / hex utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
+// This client's own version, read at runtime from package.json (test/version.test.js
+// asserts they never drift). HM_LEGACY_HUB_REMOVAL_VERSION is computed from it —
+// never hard-coded — per the one-stable-cycle backcompat target: the legacy
+// handshake goes away at the next major.
+var HM_VERSION = '0.2.0';
+var HM_LEGACY_HUB_REMOVAL_VERSION = (function (version) {
+    var major = parseInt(version.split('.')[0], 10);
+    return (major + 1) + '.0.0';
+})(HM_VERSION);
+
 function toHex(bytes) {
     return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
 }
@@ -1032,6 +1042,15 @@ function JarbasHiveMind() {
 //                       §3.4.5): re-generating it every connect() locks the
 //                       client out after the first successful handshake.
 //   maxProtocolVersion: cap the negotiated protocol version (default 3).
+//   legacyHub:          boolean, default false. HIVEMIND-CRYPTO-1 §3 makes the
+//                       Noise handshake mandatory with no version ladder to
+//                       negotiate down — a hub that cannot complete it is
+//                       refused. Setting legacyHub explicitly opts an operator
+//                       into the pre-v3 password handshake against a hub that
+//                       cannot speak Noise; the choice never depends on what
+//                       the hub advertises. Logs one warning per connection
+//                       naming what is given up and the version the legacy
+//                       path is removed in (see HM_LEGACY_HUB_REMOVAL_VERSION).
 JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, password, options) {
     options = options || {};
     this._password = password;
@@ -1040,6 +1059,8 @@ JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, pa
     this._state = States.DISCONNECTED;
     this._binarize = false;
     this._serverSupportsBinarize = false;
+    this._legacyHub = !!options.legacyHub;
+    this._legacyHubWarned = false;
 
     this._maxProtocolVersion = options.maxProtocolVersion !== undefined ? options.maxProtocolVersion : 3;
     this._psk = typeof options.psk === 'string' ? fromHex(options.psk) : (options.psk || null);
@@ -1274,10 +1295,43 @@ JarbasHiveMind.prototype._handleServerHandshake = async function (payload) {
         var psk = await this._resolveNoisePsk(payload);
         if (psk) {
             await this._startNoiseHandshake(payload, psk);
-        } else {
+        } else if (this._legacyHub) {
+            this._warnLegacyHub();
             await this._sendClientHandshake(payload);
+        } else {
+            // HIVEMIND-CRYPTO-1 §3: the handshake is mandatory, with no
+            // cleartext/PSK/password alternative and no version ladder to
+            // negotiate down. Without legacyHub, a hub that cannot complete
+            // the v3 Noise handshake is refused, not silently downgraded.
+            this._rejectLegacyDowngrade();
         }
     }
+};
+
+// Logs the one-per-connection warning naming what legacyHub gives up and when
+// the legacy path is removed. Never depends on what the hub advertises.
+JarbasHiveMind.prototype._warnLegacyHub = function () {
+    if (this._legacyHubWarned) return;
+    this._legacyHubWarned = true;
+    console.warn(
+        'HiveMind: legacyHub is set — using the pre-v3 password handshake. ' +
+        'This gives up the mandatory Noise handshake\'s forward secrecy, mutual ' +
+        'key confirmation and PAKE-derived session key (HIVEMIND-CRYPTO-1 §3). ' +
+        'The legacy handshake is removed in v' + HM_LEGACY_HUB_REMOVAL_VERSION + '.');
+};
+
+// The hub could not negotiate the mandatory v3 Noise handshake and legacyHub
+// is not set: refuse the connection rather than send a legacy handshake.
+JarbasHiveMind.prototype._rejectLegacyDowngrade = function () {
+    // Same shape as _abortNoise: log the specific reason here, close the
+    // socket, and let _onWsClose surface the generic pre-READY onHiveError
+    // (HIVEMIND-WIRE-1 close-code handling already covers that path).
+    console.error(
+        'HiveMind: hub could not negotiate the v3 Noise handshake and legacyHub ' +
+        'is not set — refusing to fall back to the legacy handshake. Set ' +
+        'connect(..., { legacyHub: true }) to allow this for a legacy hub.');
+    this._state = States.DISCONNECTED;
+    try { this.ws.close(); } catch (_) {}
 };
 
 // ── Protocol v3 (Noise) handshake ─────────────────────────────────────────────
@@ -1291,8 +1345,8 @@ JarbasHiveMind.prototype._resolveNoisePsk = async function (payload) {
     var noiseParams = payload.noise;
     if (!noiseParams || typeof noiseParams !== 'object') return null;
     if (!selectNoiseOptions(noiseParams.patterns, noiseParams.suites, this._serverNoiseKey)) {
-        // no mutual pattern/suite -> legacy handshake
-        console.warn('HiveMind: no mutual Noise pattern/suite, using legacy handshake');
+        // no mutual pattern/suite -> the v3 Noise handshake cannot proceed
+        console.warn('HiveMind: no mutual Noise pattern/suite');
         return null;
     }
     // 1. provisioned PSK — always interoperates (equals the server's
@@ -1315,8 +1369,7 @@ JarbasHiveMind.prototype._resolveNoisePsk = async function (payload) {
         'HiveMind: server offers protocol v3 (Noise) but no PSK can be derived. ' +
         'argon2id is unavailable — load @noble/hashes (expose ' +
         'globalThis.HiveMindNoble.argon2id in the browser) or pass ' +
-        'connect(..., { psk }) with a 32-byte provisioned PSK. ' +
-        'Falling back to the legacy handshake.');
+        'connect(..., { psk }) with a 32-byte provisioned PSK.');
     return null;
 };
 
@@ -1621,6 +1674,7 @@ if (typeof module !== 'undefined') {
         derivePskPBKDF2, derivePskArgon2,
         noiseHkdf, x25519, x25519PublicFromPrivate,
         NOISE_PATTERN_XX, NOISE_PATTERN_KK,
-        NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM, NOISE_SUITES_JS
+        NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM, NOISE_SUITES_JS,
+        HM_VERSION, HM_LEGACY_HUB_REMOVAL_VERSION
     };
 }

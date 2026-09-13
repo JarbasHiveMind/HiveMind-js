@@ -95,9 +95,10 @@ argon2id; everything else uses native Web Crypto.
 
 ### `connect(host, port, username, accessKey, password, options?)`
 
-Opens a WebSocket connection and runs the handshake automatically. When the
-server offers protocol v3 (Noise) and a PSK is available, the Noise handshake
-is used; otherwise the legacy Protocol V1 handshake runs.
+Opens a WebSocket connection and runs the handshake automatically. The Noise
+handshake is mandatory (HIVEMIND-CRYPTO-1 §3): the client never downgrades to
+the legacy Protocol V1 handshake on its own. When a hub cannot complete the
+Noise handshake, the connection is refused unless `options.legacyHub` is set.
 
 | Argument | Type | Description |
 |----------|------|-------------|
@@ -116,6 +117,7 @@ is used; otherwise the legacy Protocol V1 handshake runs.
 | `serverNoiseKey` | hex string | Pinned server static X25519 public key; enables `KKpsk0` and aborts on mismatch (TOFU pinning) |
 | `noiseStaticKey` | `Uint8Array` or hex string | This node's static X25519 private key. Optional — when omitted, the client generates one and remembers it for you, keyed by `host`/`port`/`accessKey`: `localStorage` in the browser, an in-memory process-lifetime cache in Node.js (Node has no `localStorage`, and this library will not silently write key material to a file in your home directory — pass this option yourself if you need a Node process identity to survive a restart). An explicit value here always wins over anything stored, and is itself persisted for later connects. This matters because the server pins a client's static key on first use: regenerating it every connection gets the client locked out |
 | `maxProtocolVersion` | number | Cap the negotiated protocol version (default `3`) |
+| `legacyHub` | boolean | Default `false`. Allows the pre-v3 legacy password handshake against a hub that cannot complete the mandatory Noise handshake. The choice never depends on what the hub advertises — only this switch. Setting it logs one warning per connection naming the forward-secrecy and mutual-authentication properties given up, and the version the legacy handshake is removed in (computed from this client's own version, next major) |
 | `ssl` | boolean | Connect with `wss://` instead of `ws://` for a bare `host` (default `false`). A browser on an HTTPS page cannot open a `ws://` socket at all, so any hub reached from a hosted page needs this or a `wss://` host |
 
 Returns the raw `WebSocket` instance.
@@ -196,8 +198,9 @@ This client supports **both** registered cipher suites (HIVEMIND-CRYPTO-1
 ChaCha20-Poly1305 (via `@noble/ciphers`) is **preferred**, matching the Python
 client's preference order; the suite is negotiated from the server's advertised
 list, with AES-GCM chosen only when the server offers AES-GCM but not
-ChaChaPoly. When no mutual suite exists the client falls back to the legacy
-v0-v2 handshake.
+ChaChaPoly. When no mutual suite exists, or the hub cannot otherwise complete
+the Noise handshake, the connection is refused unless `options.legacyHub` is
+set (see the API reference above).
 
 After the handshake, **all** session traffic travels as Noise transport
 messages (binary WebSocket frames) under per-direction cipher states with

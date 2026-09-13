@@ -337,8 +337,8 @@ describe('JarbasHiveMind protocol v3 client flow', () => {
         assert.ok(ws.closed);
     });
 
-    test('v0-v2 back-compat: server without Noise params -> legacy envelope handshake', async () => {
-        const { hm, ws } = connectV3();
+    test('v0-v2 back-compat: server without Noise params + legacyHub -> legacy envelope handshake', async () => {
+        const { hm, ws } = connectV3({ legacyHub: true });
         await ws.inject({ msg_type: 'hello', payload: { pubkey: 'pk', node_id: 'n1' } });
         await ws.inject({
             msg_type: 'shake',
@@ -436,7 +436,7 @@ describe('JarbasHiveMind protocol v3 client flow', () => {
     });
 
     test('maxProtocolVersion cap forces the legacy path', async () => {
-        const { ws } = connectV3({ maxProtocolVersion: 2 });
+        const { ws } = connectV3({ maxProtocolVersion: 2, legacyHub: true });
         await ws.inject({ msg_type: 'hello', payload: v.hello_payload });
         await ws.inject({ msg_type: 'shake', payload: v.handshake_payload });
         const msg = JSON.parse(ws.sent[ws.sent.length - 1]);
