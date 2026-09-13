@@ -24,6 +24,12 @@ function toHex(bytes) {
 }
 
 function fromHex(hex) {
+    // Refuse anything that is not an even number of hex digits. parseInt()
+    // alone reads a bad digit as 0 and drops a trailing odd digit, so a typo
+    // in a key or PSK became different key material with no error.
+    if (typeof hex !== 'string' || hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) {
+        throw new Error('invalid hex string');
+    }
     const arr = new Uint8Array(hex.length / 2);
     for (let i = 0; i < hex.length; i += 2) {
         arr[i / 2] = parseInt(hex.slice(i, i + 2), 16);
@@ -961,14 +967,85 @@ function _hasLocalStorage() {
     }
 }
 
+// SHA-256, synchronous, for the storage key name only. connect() is
+// synchronous and Web Crypto digests are async. Round constants come from the
+// fractional parts of the square and cube roots of the first primes (FIPS 180-4).
+const _SHA256_INIT = new Uint32Array(8);
+const _SHA256_K = new Uint32Array(64);
+(function _sha256Constants() {
+    let n = 2, i = 0;
+    while (i < 64) {
+        let prime = true;
+        for (let d = 2; d * d <= n; d++) if (n % d === 0) { prime = false; break; }
+        if (prime) {
+            if (i < 8) _SHA256_INIT[i] = ((Math.sqrt(n) % 1) * 4294967296) >>> 0;
+            _SHA256_K[i++] = ((Math.cbrt(n) % 1) * 4294967296) >>> 0;
+        }
+        n++;
+    }
+})();
+
+function _sha256Sync(msg) {
+    const len = msg.length;
+    const total = (len + 9 + 63) & ~63;
+    const buf = new Uint8Array(total);
+    buf.set(msg);
+    buf[len] = 0x80;
+    const dv = new DataView(buf.buffer);
+    dv.setUint32(total - 8, Math.floor(len / 0x20000000));
+    dv.setUint32(total - 4, (len << 3) >>> 0);
+    const H = _SHA256_INIT.slice();
+    const w = new Uint32Array(64);
+    const K = _SHA256_K;
+    for (let off = 0; off < total; off += 64) {
+        for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4);
+        for (let i = 16; i < 64; i++) {
+            const x = w[i - 15], y = w[i - 2];
+            const s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
+            const s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+        }
+        let a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+        for (let i = 0; i < 64; i++) {
+            const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+            const T1 = (h + S1 + ((e & f) ^ (~e & g)) + K[i] + w[i]) | 0;
+            const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+            const T2 = (S0 + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+            h = g; g = f; f = e; e = (d + T1) | 0; d = c; c = b; b = a; a = (T1 + T2) | 0;
+        }
+        H[0] += a; H[1] += b; H[2] += c; H[3] += d; H[4] += e; H[5] += f; H[6] += g; H[7] += h;
+    }
+    const out = new Uint8Array(32);
+    const odv = new DataView(out.buffer);
+    for (let i = 0; i < 8; i++) odv.setUint32(i * 4, H[i]);
+    return out;
+}
+
+// Any script on the origin can list localStorage key names, so the name
+// carries a SHA-256 digest of host, port and access key, not the access key
+// itself. The JSON array keeps a ':' in a field from joining two hubs.
 function _noiseStorageKey(host, port, accessKey) {
+    const id = JSON.stringify([String(host), String(port), String(accessKey)]);
+    return 'hivemind:noise-static-key:v2:' + toHex(_sha256Sync(new TextEncoder().encode(id)));
+}
+
+// The name used before the digest. Read once to migrate a stored key, so a
+// client that upgrades keeps the static key the server has pinned.
+function _legacyNoiseStorageKey(host, port, accessKey) {
     return 'hivemind:noise-static-key:' + host + ':' + port + ':' + accessKey;
 }
 
-function _loadPersistedNoiseStaticKey(key) {
+function _loadPersistedNoiseStaticKey(key, legacyKey) {
     if (_hasLocalStorage()) {
         try {
-            const hex = localStorage.getItem(key);
+            let hex = localStorage.getItem(key);
+            if (!hex && legacyKey) {
+                hex = localStorage.getItem(legacyKey);
+                if (hex) {
+                    localStorage.setItem(key, hex);
+                    localStorage.removeItem(legacyKey);
+                }
+            }
             return hex ? fromHex(hex) : null;
         } catch (e) {
             console.warn('HiveMind: localStorage unavailable, cannot load persisted Noise static key', e);
@@ -978,10 +1055,11 @@ function _loadPersistedNoiseStaticKey(key) {
     return _nodeNoiseStaticKeyCache.has(key) ? _nodeNoiseStaticKeyCache.get(key) : null;
 }
 
-function _persistNoiseStaticKey(key, priv) {
+function _persistNoiseStaticKey(key, priv, legacyKey) {
     if (_hasLocalStorage()) {
         try {
             localStorage.setItem(key, toHex(priv));
+            if (legacyKey) localStorage.removeItem(legacyKey);
         } catch (e) {
             console.warn('HiveMind: localStorage unavailable, Noise static key will not persist across reloads', e);
         }
@@ -1075,10 +1153,11 @@ JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, pa
     // wins and gets persisted too, so future connects without the option
     // still pick it up.
     var noiseStorageKey = _noiseStorageKey(host, port, accessKey);
+    var legacyNoiseStorageKey = _legacyNoiseStorageKey(host, port, accessKey);
     if (this._noiseStaticKey) {
-        _persistNoiseStaticKey(noiseStorageKey, this._noiseStaticKey);
+        _persistNoiseStaticKey(noiseStorageKey, this._noiseStaticKey, legacyNoiseStorageKey);
     } else {
-        var storedNoiseStaticKey = _loadPersistedNoiseStaticKey(noiseStorageKey);
+        var storedNoiseStaticKey = _loadPersistedNoiseStaticKey(noiseStorageKey, legacyNoiseStorageKey);
         if (storedNoiseStaticKey) {
             this._noiseStaticKey = storedNoiseStaticKey;
         } else {
