@@ -1093,6 +1093,7 @@ JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, pa
     this._serverHandshakePayload = null;
     this._noiseHandshake = null;
     this._noiseTransport = null;
+    this._abortReason = null;
 
     var authToken = btoa(username + ':' + accessKey);
     // A hardcoded 'ws://' cannot reach any hub behind TLS, and a browser on an
@@ -1196,9 +1197,44 @@ JarbasHiveMind.prototype._onWsOpen = function () {
     if (this.ws && typeof this.ws.binaryType !== 'undefined') {
         this.ws.binaryType = 'arraybuffer';
     }
+    if (this.ws) this.ws.onerror = this._onWsError.bind(this);
 };
 
+// A socket error after READY is reported here. Before READY, the close that
+// follows the error reports it, so the caller gets one error, not two.
+JarbasHiveMind.prototype._onWsError = function (event) {
+    if (this._state !== States.READY) return;
+    var detail = event && event.message ? ': ' + event.message : '';
+    this._safeHiveError(new Error('HiveMind WebSocket error' + detail));
+};
+
+// onHiveError is consumer code. An exception in it must not escape into the
+// socket event loop as an unhandled rejection.
+JarbasHiveMind.prototype._safeHiveError = function (err) {
+    try {
+        this.onHiveError(err);
+    } catch (e) {
+        console.error('HiveMind: onHiveError threw', e);
+    }
+};
+
+// Every incoming frame goes through here. An exception in a handler or in a
+// consumer hook reaches onHiveError instead of an unhandled promise
+// rejection. Before READY, a handshake step that fails closes the
+// connection, and the close reports the reason.
 JarbasHiveMind.prototype._onWsMessage = async function (event) {
+    try {
+        await this._handleWsMessage(event);
+    } catch (e) {
+        if (this._state < States.READY) {
+            this._abortNoise('handshake failed: ' + (e && e.message ? e.message : e));
+        } else {
+            this._safeHiveError(e);
+        }
+    }
+};
+
+JarbasHiveMind.prototype._handleWsMessage = async function (event) {
     // Binary frame path (post-handshake binarize mode)
     if (event.data instanceof ArrayBuffer) {
         await this._handleBinaryWsMessage(event.data);
@@ -1243,8 +1279,14 @@ JarbasHiveMind.prototype._onWsClose = function (event) {
         // (from a premature log) and then silence, with no error and no
         // onHiveDisconnected reason to explain it.
         var reason = (event && event.reason) ? (': ' + event.reason) : '';
+        var abortReason = this._abortReason;
+        this._abortReason = null;
         var message;
-        if (closeCode === 1008) {
+        if (abortReason) {
+            // this client closed the connection: say why
+            message = 'HiveMind connection aborted by the client: ' + abortReason +
+                ' (close code ' + (closeCode !== undefined ? closeCode : 'unknown') + ')' + reason;
+        } else if (closeCode === 1008) {
             // HIVEMIND-WIRE-1: 1008 (Policy Violation) means the server
             // rejected the credentials/handshake — fatal, not a transient drop.
             message = 'HiveMind connection refused: credentials rejected by server (close code 1008)' + reason;
@@ -1252,7 +1294,7 @@ JarbasHiveMind.prototype._onWsClose = function (event) {
             message = 'HiveMind connection refused before handshake completed (close code ' +
                 (closeCode !== undefined ? closeCode : 'unknown') + ')' + reason;
         }
-        this.onHiveError(new Error(message));
+        this._safeHiveError(new Error(message));
     }
     this.onHiveDisconnected();
 };
@@ -1452,6 +1494,8 @@ JarbasHiveMind.prototype._receiveNoiseHandshake = async function (payload) {
 JarbasHiveMind.prototype._abortNoise = function (reason) {
     // fatal handshake failure — reject the connection (§3.4.3)
     console.error('HiveMind: aborting protocol v3 connection: ' + reason);
+    // kept for _onWsClose, which reports it through onHiveError
+    this._abortReason = reason;
     this._noiseHandshake = null;
     this._noiseTransport = null;
     this._state = States.DISCONNECTED;
