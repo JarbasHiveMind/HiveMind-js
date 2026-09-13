@@ -34,6 +34,7 @@
     "test:e2e": "python3 test/e2e/loopback_hub.py"
   },
   "devDependencies": {
+    "esbuild": "^0.25.12",
     "ws": "^8.21.3"
   },
   "keywords": [
@@ -53,7 +54,7 @@
     "web-crypto"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "@noble/ciphers": "^2.4.0",
