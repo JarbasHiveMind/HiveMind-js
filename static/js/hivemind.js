@@ -1008,6 +1008,11 @@ function JarbasHiveMind() {
     this._binarize = false;    // true after handshake if server+client agree on binary frames
     this._serverSupportsBinarize = false;
     this.ws = null;
+    // Connection generation. connect() and a socket close both advance it.
+    // Async work (key derivation, AEAD) captures it first and drops its
+    // result when it changed meanwhile, so a finished derivation cannot
+    // revive a closed connection or write into a newer one.
+    this._generation = 0;
 
     // protocol v3 (Noise) state
     this._maxProtocolVersion = 3;   // highest protocol version this client offers
@@ -1109,11 +1114,30 @@ JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, pa
         scheme = 'ws://';
     }
     var url = scheme + host + ':' + port + '?authorization=' + authToken;
+    // A socket from an earlier connect() must not act on this connection:
+    // detach its handlers and close it.
+    var gen = ++this._generation;
+    _detachSocket(this.ws);
+    var self = this;
     this.ws = new WebSocket(url);
-    this.ws.onopen    = this._onWsOpen.bind(this);
-    this.ws.onmessage = this._onWsMessage.bind(this);
-    this.ws.onclose   = this._onWsClose.bind(this);
+    this.ws.onopen    = function (e) { if (self._isCurrent(gen)) self._onWsOpen(e); };
+    this.ws.onmessage = function (e) { if (self._isCurrent(gen)) return self._onWsMessage(e); };
+    this.ws.onclose   = function (e) { if (self._isCurrent(gen)) self._onWsClose(e); };
     return this.ws;
+};
+
+function _detachSocket(ws) {
+    if (!ws) return;
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    try { ws.close(); } catch (_) {}
+}
+
+// true while the connection that started some async work is still the live one
+JarbasHiveMind.prototype._isCurrent = function (gen) {
+    return gen === this._generation;
 };
 
 // Sends an arbitrary HiveMessage after the handshake is complete.
@@ -1123,9 +1147,11 @@ JarbasHiveMind.prototype.sendMessage = async function (hiveMessage) {
     if (this._state < States.READY) {
         throw new Error('Not connected: handshake not complete');
     }
+    var gen = this._generation;
     if (this._noiseTransport) {
         // protocol v3: every message is a Noise transport message (§3.4.5)
         var v3frame = await this._noiseTransport.encryptFrame(JSON.stringify(hiveMessage));
+        this._assertCurrent(gen);
         this.ws.send(v3frame.buffer);
         return;
     }
@@ -1135,6 +1161,7 @@ JarbasHiveMind.prototype.sendMessage = async function (hiveMessage) {
         await this._sendEncryptedBinary(frame);
     } else {
         var encrypted = await this._encrypt(JSON.stringify(hiveMessage));
+        this._assertCurrent(gen);
         this._send(encrypted);
     }
 };
@@ -1198,7 +1225,14 @@ JarbasHiveMind.prototype._onWsOpen = function () {
     }
 };
 
+JarbasHiveMind.prototype._assertCurrent = function (gen) {
+    if (!this._isCurrent(gen)) {
+        throw new Error('Not connected: the connection closed before the message was sent');
+    }
+};
+
 JarbasHiveMind.prototype._onWsMessage = async function (event) {
+    var gen = this._generation;
     // Binary frame path (post-handshake binarize mode)
     if (event.data instanceof ArrayBuffer) {
         await this._handleBinaryWsMessage(event.data);
@@ -1220,6 +1254,7 @@ JarbasHiveMind.prototype._onWsMessage = async function (event) {
         if (msg.ciphertext) {
             try {
                 var plaintext = await this._decrypt(msg);
+                if (!this._isCurrent(gen)) return;
                 msg = JSON.parse(plaintext);
             } catch (e) {
                 console.error('HiveMind: decryption failed', e);
@@ -1231,6 +1266,8 @@ JarbasHiveMind.prototype._onWsMessage = async function (event) {
 };
 
 JarbasHiveMind.prototype._onWsClose = function (event) {
+    // this connection is over: in-flight async work for it must stop
+    this._generation++;
     var wasReady = this._state === States.READY;
     var closeCode = event && event.code;
     this._state = States.DISCONNECTED;
@@ -1281,6 +1318,7 @@ JarbasHiveMind.prototype._handleServerHello = async function (payload) {
 };
 
 JarbasHiveMind.prototype._handleServerHandshake = async function (payload) {
+    var gen = this._generation;
     if (payload.noise && payload.noise.msg && this._noiseHandshake) {
         // protocol v3: server's Noise handshake message
         await this._receiveNoiseHandshake(payload);
@@ -1293,6 +1331,7 @@ JarbasHiveMind.prototype._handleServerHandshake = async function (payload) {
         this._serverHandshakePayload = payload;  // Noise prologue binding (§3.4.3)
         console.log('HiveMind: HANDSHAKE request received');
         var psk = await this._resolveNoisePsk(payload);
+        if (!this._isCurrent(gen)) return;  // closed during PSK derivation
         if (psk) {
             await this._startNoiseHandshake(payload, psk);
         } else if (this._legacyHub) {
@@ -1379,8 +1418,10 @@ JarbasHiveMind.prototype._startNoiseHandshake = async function (payload, psk) {
     var sel = selectNoiseOptions(noiseParams.patterns, noiseParams.suites, this._serverNoiseKey);
     var protocolName = 'Noise_' + sel.pattern + '_' + sel.suite;
     var prologue = buildNoisePrologue(this._serverHelloPayload, payload, protocolName);
+    var gen = this._generation;
+    var handshake, msg1;
     try {
-        this._noiseHandshake = await NoiseHandshake.create({
+        handshake = await NoiseHandshake.create({
             pattern: sel.pattern,
             suite: sel.suite,
             psk: psk,
@@ -1395,11 +1436,14 @@ JarbasHiveMind.prototype._startNoiseHandshake = async function (payload, psk) {
             binarize: false,
             encodings: ['JSON-HEX']
         }));
-        var msg1 = await this._noiseHandshake.writeMessage(msg1Payload);
+        msg1 = await handshake.writeMessage(msg1Payload);
     } catch (e) {
+        if (!this._isCurrent(gen)) return;
         this._abortNoise('failed to initialize Noise handshake: ' + e.message);
         return;
     }
+    if (!this._isCurrent(gen)) return;
+    this._noiseHandshake = handshake;
     console.log('HiveMind: starting protocol v3 handshake: ' + protocolName);
     this._send(this._wrap('shake', {
         noise: { pattern: sel.pattern, suite: sel.suite, msg: toHex(msg1) }
@@ -1418,18 +1462,23 @@ JarbasHiveMind.prototype._receiveNoiseHandshake = async function (payload) {
         return;
     }
     var serverSelection = {};
+    var gen = this._generation;
+    var handshake = this._noiseHandshake;
     try {
-        var noisePayload = await this._noiseHandshake.readMessage(msg);
-        if (!this._noiseHandshake.finished) {
+        var noisePayload = await handshake.readMessage(msg);
+        if (!this._isCurrent(gen)) return;
+        if (!handshake.finished) {
             // XXpsk2 message 3: our (encrypted) static key + final DH mix
-            var msg3 = await this._noiseHandshake.writeMessage(new Uint8Array(0));
+            var msg3 = await handshake.writeMessage(new Uint8Array(0));
+            if (!this._isCurrent(gen)) return;
             this._send(this._wrap('shake', { noise: { msg: toHex(msg3) } }));
         }
         if (noisePayload && noisePayload.length) {
             try { serverSelection = JSON.parse(new TextDecoder().decode(noisePayload)); } catch (_) {}
         }
-        var transport = new NoiseTransport(this._noiseHandshake);
+        var transport = new NoiseTransport(handshake);
     } catch (e) {
+        if (!this._isCurrent(gen)) return;
         // wrong password/PSK, tampered negotiation (prologue mismatch) or a bad
         // static key -> fatal, fails cryptographically at handshake time (§3.4.3)
         this._abortNoise('Noise handshake authentication failure (wrong PSK/password or tampered negotiation)');
@@ -1459,7 +1508,9 @@ JarbasHiveMind.prototype._abortNoise = function (reason) {
 };
 
 JarbasHiveMind.prototype._sendClientHandshake = async function (serverPayload) {
+    var gen = this._generation;
     var result = await this._handshake.generateHandshake();
+    if (!this._isCurrent(gen)) return;
     var hsMsg = this._wrap('shake', {
         envelope:  result.envelope,
         encodings: ['JSON-HEX'],
@@ -1479,8 +1530,11 @@ JarbasHiveMind.prototype._receiveHandshakeResponse = async function (payload) {
     this._binarize = this._serverSupportsBinarize;
 
     // Compute salt = XOR(own_iv, server_iv) then derive 32-byte session key
+    var gen = this._generation;
     this._handshake.receiveHandshake(serverEnvelope);
-    this._sessionKey = await this._handshake.deriveSecret();
+    var sessionKey = await this._handshake.deriveSecret();
+    if (!this._isCurrent(gen)) return;  // closed during key derivation
+    this._sessionKey = sessionKey;
     this._state = States.KEY_DERIVED;
     console.log('HiveMind: key derived, size:', this._sessionKey.length * 8, 'bit');
 
@@ -1495,9 +1549,11 @@ JarbasHiveMind.prototype._sendClientHello = async function () {
         site_id: 'browser'
     };
     var hiveMsg = this._wrap('hello', helloPayload);
+    var gen = this._generation;
     if (this._noiseTransport) {
         // protocol v3: the encrypted HELLO is the first Noise transport message
         var frame = await this._noiseTransport.encryptFrame(JSON.stringify(hiveMsg));
+        if (!this._isCurrent(gen)) return;
         this.ws.send(frame.buffer);
         this._state = States.READY;
         console.log('HiveMind: HELLO sent — Connected');
@@ -1506,6 +1562,7 @@ JarbasHiveMind.prototype._sendClientHello = async function () {
     }
     // HELLO is sent encrypted (key is now established)
     var encrypted = await this._encrypt(JSON.stringify(hiveMsg));
+    if (!this._isCurrent(gen)) return;
     this._send(encrypted);
     this._state = States.READY;
     console.log('HiveMind: HELLO sent — Connected');
@@ -1547,6 +1604,7 @@ JarbasHiveMind.prototype._handleUserMessage = function (msg) {
 // decrypt → decode bitstring → dispatch to _handleUserMessage.
 JarbasHiveMind.prototype._handleBinaryWsMessage = async function (buffer) {
     var frame = new Uint8Array(buffer);
+    var gen = this._generation;
     if (this._noiseTransport) {
         // protocol v3: only valid Noise transport messages are accepted after
         // Split(); an AEAD failure means tampering/replay and is fatal (§3.4.5)
@@ -1554,9 +1612,11 @@ JarbasHiveMind.prototype._handleBinaryWsMessage = async function (buffer) {
         try {
             inner = await this._noiseTransport.decryptFrame(frame);
         } catch (e) {
+            if (!this._isCurrent(gen)) return;
             this._abortNoise('Noise transport message rejected (tampered, replayed or out-of-order)');
             return;
         }
+        if (!this._isCurrent(gen)) return;
         if (typeof inner === 'string') {
             var v3msg;
             try {
@@ -1574,6 +1634,7 @@ JarbasHiveMind.prototype._handleBinaryWsMessage = async function (buffer) {
                 console.error('HiveMind: bitstring decode failed', e);
                 return;
             }
+            if (!this._isCurrent(gen)) return;
             var v3payload = v3decoded.payload;
             if (v3decoded.msgType !== 'bin' && typeof v3payload === 'string') {
                 try { v3payload = JSON.parse(v3payload); } catch (_) {}
@@ -1598,6 +1659,7 @@ JarbasHiveMind.prototype._handleBinaryWsMessage = async function (buffer) {
         console.error('HiveMind: bitstring decode failed', e);
         return;
     }
+    if (!this._isCurrent(gen)) return;
     var msgPayload = decoded.payload;
     if (decoded.msgType !== 'bin' && typeof decoded.payload === 'string') {
         try { msgPayload = JSON.parse(decoded.payload); } catch (_) {}
@@ -1615,7 +1677,9 @@ JarbasHiveMind.prototype._handleBinaryWsMessage = async function (buffer) {
 
 // Encrypts plaintextBytes with binary AES-GCM and sends as an ArrayBuffer WS frame.
 JarbasHiveMind.prototype._sendEncryptedBinary = async function (plaintextBytes) {
+    var gen = this._generation;
     var frame = await encryptAesGcmBin(this._sessionKey, plaintextBytes);
+    this._assertCurrent(gen);
     this.ws.send(frame.buffer);
 };
 
