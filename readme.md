@@ -96,8 +96,12 @@ argon2id; everything else uses native Web Crypto.
 ### `connect(host, port, username, accessKey, password, options?)`
 
 Opens a WebSocket connection and runs the handshake automatically. When the
-server offers protocol v3 (Noise) and a PSK is available, the Noise handshake
-is used; otherwise the legacy Protocol V1 handshake runs.
+server offers protocol v3 (Noise), the Noise handshake is used. If the client
+cannot run it, because no PSK can be derived (no `psk` option and argon2id is
+unavailable) or there is no mutual pattern or suite, the client refuses the
+connection and reports the reason through `onHiveError`. It never falls back to
+the legacy handshake (HIVEMIND-CRYPTO-1 §3). The legacy Protocol V1 handshake
+runs only when the server does not offer protocol v3.
 
 | Argument | Type | Description |
 |----------|------|-------------|
@@ -196,8 +200,8 @@ This client supports **both** registered cipher suites (HIVEMIND-CRYPTO-1
 ChaCha20-Poly1305 (via `@noble/ciphers`) is **preferred**, matching the Python
 client's preference order; the suite is negotiated from the server's advertised
 list, with AES-GCM chosen only when the server offers AES-GCM but not
-ChaChaPoly. When no mutual suite exists the client falls back to the legacy
-v0-v2 handshake.
+ChaChaPoly. When no mutual suite exists the client refuses the connection
+(HIVEMIND-CRYPTO-1 §3: no legacy fallback once the server offers v3).
 
 After the handshake, **all** session traffic travels as Noise transport
 messages (binary WebSocket frames) under per-direction cipher states with
