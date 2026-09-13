@@ -247,17 +247,24 @@ present as `globalThis.HiveMindNoble`. Expose them with a tiny ESM shim (both
 libraries are ESM, browser-friendly, and need no bundler):
 
 ```html
+<script src="static/js/hivemind.js"></script>
 <script type="module">
   import { chacha20poly1305 } from 'https://esm.sh/@noble/ciphers@2/chacha.js';
   import { argon2id } from 'https://esm.sh/@noble/hashes@2/argon2.js';
   globalThis.HiveMindNoble = { chacha20poly1305, argon2id };
+  // connect() only after this line has run
 </script>
-<script src="static/js/hivemind.js"></script>
 ```
 
+The client reads `globalThis.HiveMindNoble` when it connects, not when
+`hivemind.js` loads. The script order does not matter. A module script always
+runs after a classic script, so the global must be set before you call
+`connect()`, not before the script loads. If you connect from another script,
+wait for the import to finish first.
+
 Or bundle the same three lines with your app (esbuild/rollup/vite) and drop the
-CDN import. If `globalThis.HiveMindNoble` is absent the client still loads and
-runs the Web-Crypto-only subset.
+CDN import. If `globalThis.HiveMindNoble` is absent when `connect()` runs, the
+client runs the Web-Crypto-only subset.
 
 ## Protocol V1 overview
 
