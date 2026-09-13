@@ -1478,6 +1478,23 @@ JarbasHiveMind.prototype._receiveHandshakeResponse = async function (payload) {
     this._cipher   = payload.cipher   || 'AES-GCM';
     this._binarize = this._serverSupportsBinarize;
 
+    // Check the server envelope before we use its IV, as the Python client does
+    // (poorman_handshake receive_and_verify -> match_hsub). What this proves: the
+    // envelope is iv || SHA-256(iv || password) for this client's password, so a
+    // server that builds its own envelope with a wrong password is refused.
+    // What it does not prove: that the server knows the password. A server can
+    // echo this client's own envelope back, and that envelope matches. The salt
+    // is then XOR(iv, iv), eight zero bytes. The session key is still
+    // PBKDF2(password, salt), so that server cannot read the traffic, but the
+    // check gives no proof of password knowledge in that case.
+    if (typeof serverEnvelope !== 'string' || !(await this._handshake.matchHsub(serverEnvelope))) {
+        this._state = States.DISCONNECTED;
+        this._sessionKey = null;
+        this.onHiveError(new Error('HiveMind handshake failed: the server envelope does not match the password'));
+        try { this.ws.close(); } catch (_) {}
+        return;
+    }
+
     // Compute salt = XOR(own_iv, server_iv) then derive 32-byte session key
     this._handshake.receiveHandshake(serverEnvelope);
     this._sessionKey = await this._handshake.deriveSecret();
