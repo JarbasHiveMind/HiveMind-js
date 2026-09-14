@@ -265,23 +265,33 @@ function encodeBitstring(msgType, payload, metadata, binType, versioned) {
 }
 
 // decompressZlib — handles Python zlib format (RFC 1950)
+// DecompressionStream is a global in browsers and in Node.js, so one path serves
+// both. Do not require a Node built-in module here: browser bundlers cannot
+// resolve one.
 async function decompressZlib(bytes) {
-    if (typeof require === 'function') {
-        // Node.js
-        const zlib = require('zlib');
-        return new Uint8Array(zlib.inflateSync(Buffer.from(bytes)));
-    }
-    // Browser — DecompressionStream('deflate') handles RFC 1950 zlib format
+    // DecompressionStream('deflate') handles RFC 1950 zlib format
     const ds = new DecompressionStream('deflate');
     const writer = ds.writable.getWriter();
     const reader = ds.readable.getReader();
-    writer.write(bytes);
-    writer.close();
+    // Start writing without waiting on it, so a large output cannot block the
+    // writer on a reader that has not started. Keep the promise and await it
+    // inside the try: a damaged stream rejects both sides, and an unhandled
+    // writer rejection would end a Node.js process.
+    const writing = writer.write(bytes).then(() => writer.close());
+    writing.catch(() => {});
     const chunks = [];
-    for (;;) {
-        const { value, done } = await reader.read();
-        if (value) chunks.push(value);
-        if (done) break;
+    try {
+        for (;;) {
+            const { value, done } = await reader.read();
+            if (value) chunks.push(value);
+            if (done) break;
+        }
+        await writing;
+    } catch (e) {
+        // The stream error is a TypeError with an empty message; the zlib reason
+        // is in its cause, which a plain log does not print.
+        const reason = (e && e.cause && e.cause.message) || (e && e.message) || 'invalid zlib data';
+        throw new Error('HiveMind: zlib decompression failed: ' + reason);
     }
     const total = chunks.reduce((acc, c) => acc + c.length, 0);
     const result = new Uint8Array(total);
