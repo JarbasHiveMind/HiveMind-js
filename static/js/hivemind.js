@@ -450,19 +450,23 @@ PasswordHandShake.prototype.deriveSecret = async function () {
 // Paul Miller). When absent (a minimal browser deployment that skipped the
 // bundle) the client degrades to the Web-Crypto-only AES-GCM + PBKDF2 subset.
 //
-// The global is read on every use, not once at script load. A page loads this
-// file as a classic script, and a module script that imports @noble runs after
-// it, so a load-time read always sees nothing in the browser.
-let _requiredNoble = null;
+// The BROWSER global is read on every use, not once at script load. A page
+// loads this file as a classic script, and a module script that imports
+// @noble runs after it, so a load-time read always sees nothing in the
+// browser.
+//
+// The require() backend resolves ONCE, here at script load, like every other
+// Node dependency. A caller that removes or blocks @noble at load time gets a
+// client that stays in the Web-Crypto-only subset for its whole life; a lazy
+// require() would pick the packages up later and leave that deployment shape
+// untestable.
+const _requiredNoble = {};
+if (typeof require === 'function') {
+    try { _requiredNoble.chacha20poly1305 = require('@noble/ciphers/chacha.js').chacha20poly1305; } catch (_) { /* optional */ }
+    try { _requiredNoble.argon2id = require('@noble/hashes/argon2.js').argon2id; } catch (_) { /* optional */ }
+}
 function _noble() {
     const g = (typeof globalThis !== 'undefined' && globalThis.HiveMindNoble) || {};
-    if (_requiredNoble === null) {
-        _requiredNoble = {};
-        if (typeof require === 'function') {
-            try { _requiredNoble.chacha20poly1305 = require('@noble/ciphers/chacha.js').chacha20poly1305; } catch (_) { /* optional */ }
-            try { _requiredNoble.argon2id = require('@noble/hashes/argon2.js').argon2id; } catch (_) { /* optional */ }
-        }
-    }
     return {
         chacha20poly1305: g.chacha20poly1305 || _requiredNoble.chacha20poly1305 || null,
         argon2id: g.argon2id || _requiredNoble.argon2id || null
