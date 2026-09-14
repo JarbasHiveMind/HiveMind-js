@@ -31,6 +31,15 @@ function fromHex(hex) {
     return arr;
 }
 
+// Base64 of the UTF-8 bytes of a string. btoa() alone accepts only Latin-1
+// characters and throws on any other character.
+function _utf8ToBase64(text) {
+    const bytes = new TextEncoder().encode(text);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+}
+
 function xorBytes(a, b) {
     const result = new Uint8Array(Math.min(a.length, b.length));
     for (let i = 0; i < result.length; i++) result[i] = a[i] ^ b[i];
@@ -1160,7 +1169,9 @@ JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, pa
     this._noiseHandshake = null;
     this._noiseTransport = null;
 
-    var authToken = btoa(username + ':' + accessKey);
+    // The hub percent-decodes the query and decodes the base64 as UTF-8, so
+    // encode UTF-8 first, then percent-encode ("+" would arrive as a space).
+    var authToken = encodeURIComponent(_utf8ToBase64(username + ':' + accessKey));
     // A hardcoded 'ws://' cannot reach any hub behind TLS, and a browser on an
     // HTTPS page refuses a ws:// socket outright as mixed content — so the
     // client could not be used from the one place it exists for. `host` may
