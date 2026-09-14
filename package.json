@@ -14,8 +14,10 @@
   },
   "main": "static/js/hivemind.js",
   "module": "static/js/hivemind.mjs",
+  "types": "static/js/hivemind.d.ts",
   "exports": {
     ".": {
+      "types": "./static/js/hivemind.d.ts",
       "require": "./static/js/hivemind.js",
       "import": "./static/js/hivemind.mjs",
       "default": "./static/js/hivemind.js"
@@ -25,6 +27,7 @@
   "files": [
     "static/js/hivemind.js",
     "static/js/hivemind.mjs",
+    "static/js/hivemind.d.ts",
     "docs",
     "readme.md",
     "LICENSE"
