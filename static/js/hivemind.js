@@ -158,6 +158,9 @@ const INT_TO_MSG_TYPE = Object.fromEntries(
     Object.entries(MSG_TYPE_TO_INT).map(([k, v]) => [v, k])
 );
 
+// WIRE-1 §4.1: the metadata-length field is 8 bits
+const MAX_METADATA_BYTES = 255;
+
 const BIN_TYPES = {
     UNDEFINED: 0, RAW_AUDIO: 1, NUMPY_IMAGE: 2, FILE: 3,
     STT_AUDIO_TRANSCRIBE: 4, STT_AUDIO_HANDLE: 5, TTS_AUDIO: 6
@@ -253,6 +256,13 @@ function encodeBitstring(msgType, payload, metadata, binType, versioned) {
     w.writeUint(0, 1);                  // compressed = false
 
     const metaBytes = new TextEncoder().encode(JSON.stringify(metadata));
+    // WIRE-1 §4.1: the metadata-length field is 8 bits. A longer block would
+    // wrap the length and corrupt the frame, so refuse it. The Python
+    // reference raises MetadataTooLarge at the same limit.
+    if (metaBytes.length > MAX_METADATA_BYTES) {
+        throw new Error('encodeBitstring: metadata is ' + metaBytes.length +
+            ' bytes; the frame layout allows at most ' + MAX_METADATA_BYTES);
+    }
     w.writeUint(metaBytes.length, 8);   // meta length in bytes
     w.writeBytes(metaBytes);            // meta content
 
