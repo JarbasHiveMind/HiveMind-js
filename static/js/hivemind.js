@@ -1708,9 +1708,11 @@ JarbasHiveMind.prototype._receiveHandshakeResponse = async function (payload) {
     // PBKDF2(password, salt), so that server cannot read the traffic, but the
     // check gives no proof of password knowledge in that case.
     if (typeof serverEnvelope !== 'string' || !(await this._handshake.matchHsub(serverEnvelope))) {
+        // _onWsClose reports the reason once. A direct onHiveError here was
+        // followed by a second, misleading "refused" error from the close.
+        this._abortReason = 'handshake failed: the server envelope does not match the password';
         this._state = States.DISCONNECTED;
         this._sessionKey = null;
-        this.onHiveError(new Error('HiveMind handshake failed: the server envelope does not match the password'));
         try { this.ws.close(); } catch (_) {}
         return;
     }
