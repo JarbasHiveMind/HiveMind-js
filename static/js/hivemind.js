@@ -1897,25 +1897,34 @@ if (typeof globalThis !== 'undefined') {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Node.js / CommonJS export
+// Node.js / CommonJS export, and the native-ESM hand-off
 // ─────────────────────────────────────────────────────────────────────────────
 
+// One export object for both cases. Under CommonJS it is module.exports. A
+// browser that imports hivemind.mjs with <script type="module"> loads this
+// file as a module: there is no `module`, and a module scope hides the
+// declarations above, so the object goes on globalThis.HiveMindJS for
+// hivemind.mjs to read.
+const HIVEMIND_EXPORTS = {
+    JarbasHiveMind, PasswordHandShake, States,
+    encryptAesGcm, decryptAesGcm,
+    encryptAesGcmBin, decryptAesGcmBin,
+    encodeBitstring, decodeBitstring,
+    BIN_TYPES, MSG_TYPE_TO_INT, INT_TO_MSG_TYPE,
+    // protocol v3 (Noise)
+    NoiseHandshake, NoiseTransport, NoiseCipherState, NoiseSymmetricState,
+    selectNoiseOptions, buildNoisePrologue, canonicalJson,
+    derivePskPBKDF2, derivePskArgon2,
+    noiseHkdf, x25519, x25519PublicFromPrivate,
+    NOISE_PATTERN_XX, NOISE_PATTERN_KK,
+    NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM, noiseSuitesJs,
+    // kept for callers of the old constant; now read at access time
+    get NOISE_SUITES_JS() { return noiseSuitesJs(); },
+    HM_VERSION, HM_LEGACY_HUB_REMOVAL_VERSION
+};
+
 if (typeof module !== 'undefined') {
-    module.exports = {
-        JarbasHiveMind, PasswordHandShake, States,
-        encryptAesGcm, decryptAesGcm,
-        encryptAesGcmBin, decryptAesGcmBin,
-        encodeBitstring, decodeBitstring,
-        BIN_TYPES, MSG_TYPE_TO_INT, INT_TO_MSG_TYPE,
-        // protocol v3 (Noise)
-        NoiseHandshake, NoiseTransport, NoiseCipherState, NoiseSymmetricState,
-        selectNoiseOptions, buildNoisePrologue, canonicalJson,
-        derivePskPBKDF2, derivePskArgon2,
-        noiseHkdf, x25519, x25519PublicFromPrivate,
-        NOISE_PATTERN_XX, NOISE_PATTERN_KK,
-        NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM, noiseSuitesJs,
-        // kept for callers of the old constant; now read at access time
-        get NOISE_SUITES_JS() { return noiseSuitesJs(); },
-        HM_VERSION, HM_LEGACY_HUB_REMOVAL_VERSION
-    };
+    module.exports = HIVEMIND_EXPORTS;
+} else if (typeof globalThis !== 'undefined') {
+    globalThis.HiveMindJS = HIVEMIND_EXPORTS;
 }

@@ -53,6 +53,20 @@ In Node.js the `@noble` dependencies are resolved automatically. For the browser
 </html>
 ```
 
+### Native ES module (no bundler)
+
+A page can also import the ESM entry point directly:
+
+```html
+<script type="module">
+    import { JarbasHiveMind } from './static/js/hivemind.mjs';
+    const hivemind = new JarbasHiveMind();
+</script>
+```
+
+The browser then loads `hivemind.js` as a module. The file puts its exports on
+`globalThis.HiveMindJS`, and `hivemind.mjs` reads them from there.
+
 ## Quick start (Node.js)
 
 In Node.js, supply a WebSocket implementation on `globalThis` (the client uses the
@@ -302,6 +316,7 @@ Test files:
 | `test/handshake.test.js` | Full connection state machine with a `MockWebSocket` |
 | `test/binary.test.js` | Bitstring codec, binary encryption, binarize handshake negotiation, binary send/receive |
 | `test/noise-persistence.test.js` | Noise static key persistence across `connect()` calls, and the pre-READY close that reports `onHiveError` |
+| `test/esm-native.test.js` | Importing `hivemind.mjs` as native ESM, with no `module` and no `require`, as a browser does |
 | `test/real_hub.test.js` | Reaching a real hub: `wss://` and `options.ssl` URL selection, and the spoken-response topic names |
 | `test/noise.test.js` | Protocol v3 Noise handshake: byte-level interop against Python `poorman_handshake`/`noiseprotocol` responder fixtures for **both suites** (ChaChaPoly + AES-GCM) across **both patterns** (XXpsk2 + KKpsk0), wrong-PSK/tampered-prologue failure, transport replay rejection, **argon2id** + PBKDF2 PSK derivation (byte-verified vs `derive_psk`), client negotiation (ChaChaPoly preferred) + v0-v2 fallback |
 
