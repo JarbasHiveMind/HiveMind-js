@@ -14,8 +14,10 @@
   },
   "main": "static/js/hivemind.js",
   "module": "static/js/hivemind.mjs",
+  "types": "static/js/hivemind.d.ts",
   "exports": {
     ".": {
+      "types": "./static/js/hivemind.d.ts",
       "require": "./static/js/hivemind.js",
       "import": "./static/js/hivemind.mjs",
       "default": "./static/js/hivemind.js"
@@ -25,6 +27,7 @@
   "files": [
     "static/js/hivemind.js",
     "static/js/hivemind.mjs",
+    "static/js/hivemind.d.ts",
     "docs",
     "readme.md",
     "LICENSE"
@@ -34,6 +37,7 @@
     "test:e2e": "python3 test/e2e/loopback_hub.py"
   },
   "devDependencies": {
+    "esbuild": "^0.25.12",
     "ws": "^8.21.3"
   },
   "keywords": [
@@ -53,7 +57,7 @@
     "web-crypto"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "@noble/ciphers": "^2.4.0",
