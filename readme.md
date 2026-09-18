@@ -30,10 +30,11 @@ In Node.js the `@noble` dependencies are resolved automatically. For the browser
 <script>
     const hivemind = new JarbasHiveMind();
 
-    // Override event hooks before connecting
-    hivemind.onHiveConnected = function () {
-        // Fires only after the full handshake completes, not on socket open
-        window.alert("Connected to HiveMind!");
+    // Override event hooks before connecting.
+    // onHiveConnected fires only after the full handshake completes, not on
+    // socket open. sendUtterance and sendMessage are safe to call from it.
+    hivemind.onHiveConnected = async function () {
+        await hivemind.sendUtterance("tell me a joke");
     };
 
     hivemind.onMycroftSpeak = function (mycroft_message) {
@@ -45,17 +46,26 @@ In Node.js the `@noble` dependencies are resolved automatically. For the browser
     };
 
     // connect(host, port, username, accessKey, password)
-    // The 5th argument is the V1 shared password used for PBKDF2 key derivation.
+    // The 5th argument is the shared password of this client on the hub.
     hivemind.connect("127.0.0.1", 5678, "HivemindWebChat", "ivf1NQSkQNogWYyr", "mypassword");
-
-    // sendUtterance / sendMessage are async, safe to call after onHiveConnected fires
-    hivemind.onHiveConnected = async function () {
-        await hivemind.sendUtterance("tell me a joke");
-    };
 </script>
 </body>
 </html>
 ```
+
+### Native ES module (no bundler)
+
+A page can also import the ESM entry point directly:
+
+```html
+<script type="module">
+    import { JarbasHiveMind } from './static/js/hivemind.mjs';
+    const hivemind = new JarbasHiveMind();
+</script>
+```
+
+The browser then loads `hivemind.js` as a module. The file puts its exports on
+`globalThis.HiveMindJS`, and `hivemind.mjs` reads them from there.
 
 ## Quick start (Node.js)
 
@@ -142,7 +152,7 @@ Override these on your instance before calling `connect()`:
 | `onHiveDisconnected()` | WebSocket closed |
 | `onHiveError(err)` | The hub refused or aborted the connection, e.g. the WebSocket closed before the handshake reached READY. A close with code `1008` means the hub rejected the credentials — treated as fatal. Fires before `onHiveDisconnected()` |
 | `onMycroftMessage(msg)` | Any `bus` message received |
-| `onMycroftSpeak(msg)` | `bus` message with type `speak` |
+| `onMycroftSpeak(msg)` | `bus` message with type `ovos.utterance.speak`, or the legacy type `speak` |
 | `onHiveBroadcast(msg)` | `broadcast` message received |
 | `onHivePropagate(msg)` | `propagate` message received |
 | `onHiveIntercom(msg)` | `intercom` message received |
@@ -247,17 +257,24 @@ present as `globalThis.HiveMindNoble`. Expose them with a tiny ESM shim (both
 libraries are ESM, browser-friendly, and need no bundler):
 
 ```html
+<script src="static/js/hivemind.js"></script>
 <script type="module">
   import { chacha20poly1305 } from 'https://esm.sh/@noble/ciphers@2/chacha.js';
   import { argon2id } from 'https://esm.sh/@noble/hashes@2/argon2.js';
   globalThis.HiveMindNoble = { chacha20poly1305, argon2id };
+  // connect() only after this line has run
 </script>
-<script src="static/js/hivemind.js"></script>
 ```
 
+The client reads `globalThis.HiveMindNoble` when it connects, not when
+`hivemind.js` loads. The script order does not matter. A module script always
+runs after a classic script, so the global must be set before you call
+`connect()`, not before the script loads. If you connect from another script,
+wait for the import to finish first.
+
 Or bundle the same three lines with your app (esbuild/rollup/vite) and drop the
-CDN import. If `globalThis.HiveMindNoble` is absent the client still loads and
-runs the Web-Crypto-only subset.
+CDN import. If `globalThis.HiveMindNoble` is absent when `connect()` runs, the
+client runs the Web-Crypto-only subset.
 
 ## Protocol V1 overview
 
@@ -279,16 +296,18 @@ See [`docs/handshake.md`](docs/handshake.md), [`docs/encryption.md`](docs/encryp
 
 ## Running the tests
 
-Requires Node.js 18+. No npm install needed.
+Requires Node.js 18+ (Node.js 20+ for the protocol v3 tests). Run `npm install`
+first: the tests load `@noble/ciphers`, `@noble/hashes` and `ws`.
 
 ```bash
 cd HiveMind-js
+npm install
 node --test test/*.test.js
 # or via package.json script:
 npm test
 ```
 
-Test suite (72 tests across 5 files):
+Test files:
 
 | File | What it covers |
 |------|----------------|
@@ -296,6 +315,9 @@ Test suite (72 tests across 5 files):
 | `test/encryption.test.js` | AES-GCM encrypt/decrypt, wire format, Python-vector round-trip |
 | `test/handshake.test.js` | Full connection state machine with a `MockWebSocket` |
 | `test/binary.test.js` | Bitstring codec, binary encryption, binarize handshake negotiation, binary send/receive |
+| `test/noise-persistence.test.js` | Noise static key persistence across `connect()` calls, and the pre-READY close that reports `onHiveError` |
+| `test/esm-native.test.js` | Importing `hivemind.mjs` as native ESM, with no `module` and no `require`, as a browser does |
+| `test/real_hub.test.js` | Reaching a real hub: `wss://` and `options.ssl` URL selection, and the spoken-response topic names |
 | `test/noise.test.js` | Protocol v3 Noise handshake: byte-level interop against Python `poorman_handshake`/`noiseprotocol` responder fixtures for **both suites** (ChaChaPoly + AES-GCM) across **both patterns** (XXpsk2 + KKpsk0), wrong-PSK/tampered-prologue failure, transport replay rejection, **argon2id** + PBKDF2 PSK derivation (byte-verified vs `derive_psk`), client negotiation (ChaChaPoly preferred) + v0-v2 fallback |
 
 To regenerate the cross-language test vectors, run `test/generate_vectors.py` in a
@@ -346,11 +368,14 @@ conformance suite.
 ```
 HiveMind-js/
 ├── static/js/
-│   └── hivemind.js          # Main client, Protocol V1
+│   ├── hivemind.js          # Main client (CommonJS and browser script)
+│   └── hivemind.mjs         # ESM entry point, re-exports hivemind.js
 ├── test/
 │   ├── crypto.test.js       # PasswordHandShake unit tests
 │   ├── encryption.test.js   # AES-GCM unit tests
 │   ├── handshake.test.js    # State machine integration tests
+│   ├── noise-persistence.test.js  # Noise static key persistence, pre-READY close
+│   ├── real_hub.test.js     # wss:// selection and spoken-response topics
 │   ├── binary.test.js       # Bitstring codec + binarize mode tests
 │   ├── generate_vectors.py  # Python script, regenerates vectors.json
 │   ├── noise.test.js        # protocol v3 Noise interop tests

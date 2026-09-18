@@ -24,11 +24,26 @@ function toHex(bytes) {
 }
 
 function fromHex(hex) {
+    // Refuse anything that is not an even number of hex digits. parseInt()
+    // alone reads a bad digit as 0 and drops a trailing odd digit, so a typo
+    // in a key or PSK became different key material with no error.
+    if (typeof hex !== 'string' || hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) {
+        throw new Error('invalid hex string');
+    }
     const arr = new Uint8Array(hex.length / 2);
     for (let i = 0; i < hex.length; i += 2) {
         arr[i / 2] = parseInt(hex.slice(i, i + 2), 16);
     }
     return arr;
+}
+
+// Base64 of the UTF-8 bytes of a string. btoa() alone accepts only Latin-1
+// characters and throws on any other character.
+function _utf8ToBase64(text) {
+    const bytes = new TextEncoder().encode(text);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
 }
 
 function xorBytes(a, b) {
@@ -152,6 +167,9 @@ const INT_TO_MSG_TYPE = Object.fromEntries(
     Object.entries(MSG_TYPE_TO_INT).map(([k, v]) => [v, k])
 );
 
+// WIRE-1 §4.1: the metadata-length field is 8 bits
+const MAX_METADATA_BYTES = 255;
+
 const BIN_TYPES = {
     UNDEFINED: 0, RAW_AUDIO: 1, NUMPY_IMAGE: 2, FILE: 3,
     STT_AUDIO_TRANSCRIBE: 4, STT_AUDIO_HANDLE: 5, TTS_AUDIO: 6
@@ -247,6 +265,13 @@ function encodeBitstring(msgType, payload, metadata, binType, versioned) {
     w.writeUint(0, 1);                  // compressed = false
 
     const metaBytes = new TextEncoder().encode(JSON.stringify(metadata));
+    // WIRE-1 §4.1: the metadata-length field is 8 bits. A longer block would
+    // wrap the length and corrupt the frame, so refuse it. The Python
+    // reference raises MetadataTooLarge at the same limit.
+    if (metaBytes.length > MAX_METADATA_BYTES) {
+        throw new Error('encodeBitstring: metadata is ' + metaBytes.length +
+            ' bytes; the frame layout allows at most ' + MAX_METADATA_BYTES);
+    }
     w.writeUint(metaBytes.length, 8);   // meta length in bytes
     w.writeBytes(metaBytes);            // meta content
 
@@ -265,23 +290,33 @@ function encodeBitstring(msgType, payload, metadata, binType, versioned) {
 }
 
 // decompressZlib — handles Python zlib format (RFC 1950)
+// DecompressionStream is a global in browsers and in Node.js, so one path serves
+// both. Do not require a Node built-in module here: browser bundlers cannot
+// resolve one.
 async function decompressZlib(bytes) {
-    if (typeof require === 'function') {
-        // Node.js
-        const zlib = require('zlib');
-        return new Uint8Array(zlib.inflateSync(Buffer.from(bytes)));
-    }
-    // Browser — DecompressionStream('deflate') handles RFC 1950 zlib format
+    // DecompressionStream('deflate') handles RFC 1950 zlib format
     const ds = new DecompressionStream('deflate');
     const writer = ds.writable.getWriter();
     const reader = ds.readable.getReader();
-    writer.write(bytes);
-    writer.close();
+    // Start writing without waiting on it, so a large output cannot block the
+    // writer on a reader that has not started. Keep the promise and await it
+    // inside the try: a damaged stream rejects both sides, and an unhandled
+    // writer rejection would end a Node.js process.
+    const writing = writer.write(bytes).then(() => writer.close());
+    writing.catch(() => {});
     const chunks = [];
-    for (;;) {
-        const { value, done } = await reader.read();
-        if (value) chunks.push(value);
-        if (done) break;
+    try {
+        for (;;) {
+            const { value, done } = await reader.read();
+            if (value) chunks.push(value);
+            if (done) break;
+        }
+        await writing;
+    } catch (e) {
+        // The stream error is a TypeError with an empty message; the zlib reason
+        // is in its cause, which a plain log does not print.
+        const reason = (e && e.cause && e.cause.message) || (e && e.message) || 'invalid zlib data';
+        throw new Error('HiveMind: zlib decompression failed: ' + reason);
     }
     const total = chunks.reduce((acc, c) => acc + c.length, 0);
     const result = new Uint8Array(total);
@@ -449,18 +484,29 @@ PasswordHandShake.prototype.deriveSecret = async function () {
 // (see the readme "Browser build" note). Both are pure-JS, audited (@noble by
 // Paul Miller). When absent (a minimal browser deployment that skipped the
 // bundle) the client degrades to the Web-Crypto-only AES-GCM + PBKDF2 subset.
-let _chacha20poly1305 = null;
-let _argon2id = null;
-(function _loadNoble() {
-    const g = (typeof globalThis !== 'undefined' && globalThis.HiveMindNoble) || null;
-    if (g) { _chacha20poly1305 = g.chacha20poly1305 || null; _argon2id = g.argon2id || null; }
-    if ((!_chacha20poly1305 || !_argon2id) && typeof require === 'function') {
-        try {
-            if (!_chacha20poly1305) _chacha20poly1305 = require('@noble/ciphers/chacha.js').chacha20poly1305;
-            if (!_argon2id) _argon2id = require('@noble/hashes/argon2.js').argon2id;
-        } catch (_) { /* optional — see note above */ }
-    }
-})();
+//
+// The BROWSER global is read on every use, not once at script load. A page
+// loads this file as a classic script, and a module script that imports
+// @noble runs after it, so a load-time read always sees nothing in the
+// browser.
+//
+// The require() backend resolves ONCE, here at script load, like every other
+// Node dependency. A caller that removes or blocks @noble at load time gets a
+// client that stays in the Web-Crypto-only subset for its whole life; a lazy
+// require() would pick the packages up later and leave that deployment shape
+// untestable.
+const _requiredNoble = {};
+if (typeof require === 'function') {
+    try { _requiredNoble.chacha20poly1305 = require('@noble/ciphers/chacha.js').chacha20poly1305; } catch (_) { /* optional */ }
+    try { _requiredNoble.argon2id = require('@noble/hashes/argon2.js').argon2id; } catch (_) { /* optional */ }
+}
+function _noble() {
+    const g = (typeof globalThis !== 'undefined' && globalThis.HiveMindNoble) || {};
+    return {
+        chacha20poly1305: g.chacha20poly1305 || _requiredNoble.chacha20poly1305 || null,
+        argon2id: g.argon2id || _requiredNoble.argon2id || null
+    };
+}
 
 const NOISE_PATTERN_XX = 'XXpsk2';
 const NOISE_PATTERN_KK = 'KKpsk0';
@@ -470,9 +516,12 @@ const NOISE_SUITE_AESGCM = '25519_AESGCM_SHA256';     // Web-Crypto-native fallb
 // suites this client can run, in PREFERENCE order (matching the Python client:
 // ChaCha20-Poly1305 first, AES-GCM for Web-Crypto-only situations). ChaCha is
 // only offered when @noble/ciphers is available; AES-GCM is always available.
-const NOISE_SUITES_JS = (_chacha20poly1305
-    ? [NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM]
-    : [NOISE_SUITE_AESGCM]);
+// Computed on each call, for the same reason as _noble().
+function noiseSuitesJs() {
+    return _noble().chacha20poly1305
+        ? [NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM]
+        : [NOISE_SUITE_AESGCM];
+}
 
 // transport frame markers (first plaintext byte) — must match
 // hivemind_bus_client.noise._FRAME_JSON / _FRAME_BINARY
@@ -573,9 +622,56 @@ class NoiseCipherState {
         this.suite = suite || NOISE_SUITE_AESGCM;
         this.k = null;      // Uint8Array(32) or null (no key yet)
         this.n = 0n;        // 64-bit message counter
+        // One operation at a time per direction. The AES-GCM path awaits Web
+        // Crypto between reading n and advancing it, so two concurrent calls
+        // would otherwise use the same nonce (HIVEMIND-CRYPTO-1 §3.5).
+        // What the queue guarantees: operations on this state run one at a
+        // time in call order, each uses the next nonce, and their promises
+        // settle in that order. It does not order what a caller does after a
+        // promise settles, so it gives no application delivery order.
+        this._tail = Promise.resolve();
+        this._pendingSends = 0;
+        this._aesKey = null;     // CryptoKey imported once for this.k
+        this._aesKeyFor = null;  // the key bytes _aesKey was imported from
     }
 
-    initializeKey(k) { this.k = k; this.n = 0n; }
+    _serialize(op) {
+        const run = this._tail.then(op);
+        this._tail = run.catch(() => {});
+        return run;
+    }
+
+    encryptWithAd(ad, plaintext) {
+        // Bound the sends waiting on this state, so a caller that sends faster
+        // than Web Crypto completes gets an error instead of an unbounded heap
+        // and an ever longer delay. Receives are not bounded here: dropping a
+        // received frame would break the strict nonce sequence.
+        if (this._pendingSends >= NoiseCipherState.MAX_PENDING_SENDS) {
+            return Promise.reject(new Error('Noise send queue full'));
+        }
+        this._pendingSends += 1;
+        const run = this._serialize(() => this._encryptWithAdNow(ad, plaintext));
+        const done = () => { this._pendingSends -= 1; };
+        run.then(done, done);
+        return run;
+    }
+
+    decryptWithAd(ad, ciphertext) {
+        return this._serialize(() => this._decryptWithAdNow(ad, ciphertext));
+    }
+
+    async _aesGcmKey() {
+        const k = this.k;
+        if (this._aesKey === null || this._aesKeyFor !== k) {
+            const key = await crypto.subtle.importKey('raw', k, 'AES-GCM', false, ['encrypt', 'decrypt']);
+            // keep it only if the key did not change while the import ran
+            if (this.k === k) { this._aesKey = key; this._aesKeyFor = k; }
+            return key;
+        }
+        return this._aesKey;
+    }
+
+    initializeKey(k) { this.k = k; this.n = 0n; this._aesKey = null; this._aesKeyFor = null; }
     hasKey() { return this.k !== null; }
 
     _nonce() {
@@ -591,15 +687,15 @@ class NoiseCipherState {
         return nonce;
     }
 
-    async encryptWithAd(ad, plaintext) {
+    async _encryptWithAdNow(ad, plaintext) {
         if (!this.hasKey()) return plaintext;
         const nonce = this._nonce();
         const aad = ad && ad.length ? ad : undefined;
         let ct;
         if (this.suite === NOISE_SUITE_CHACHA) {
-            ct = _chacha20poly1305(this.k, nonce, aad).encrypt(plaintext); // ct || 16-byte tag
+            ct = _noble().chacha20poly1305(this.k, nonce, aad).encrypt(plaintext); // ct || 16-byte tag
         } else {
-            const key = await crypto.subtle.importKey('raw', this.k, 'AES-GCM', false, ['encrypt']);
+            const key = await this._aesGcmKey();
             const params = { name: 'AES-GCM', iv: nonce, tagLength: 128 };
             if (aad) params.additionalData = aad;
             ct = new Uint8Array(await crypto.subtle.encrypt(params, key, plaintext)); // ct || tag
@@ -608,7 +704,7 @@ class NoiseCipherState {
         return ct;
     }
 
-    async decryptWithAd(ad, ciphertext) {
+    async _decryptWithAdNow(ad, ciphertext) {
         if (!this.hasKey()) return ciphertext;
         const nonce = this._nonce();
         const aad = ad && ad.length ? ad : undefined;
@@ -616,9 +712,9 @@ class NoiseCipherState {
         // and a failed message MUST NOT be retried under another nonce (§3.4.5)
         let pt;
         if (this.suite === NOISE_SUITE_CHACHA) {
-            pt = _chacha20poly1305(this.k, nonce, aad).decrypt(ciphertext);
+            pt = _noble().chacha20poly1305(this.k, nonce, aad).decrypt(ciphertext);
         } else {
-            const key = await crypto.subtle.importKey('raw', this.k, 'AES-GCM', false, ['decrypt']);
+            const key = await this._aesGcmKey();
             const params = { name: 'AES-GCM', iv: nonce, tagLength: 128 };
             if (aad) params.additionalData = aad;
             pt = new Uint8Array(await crypto.subtle.decrypt(params, key, ciphertext));
@@ -627,6 +723,10 @@ class NoiseCipherState {
         return pt;
     }
 }
+
+// Sends that may wait on one CipherState at a time. Past this, encryptWithAd
+// rejects with "Noise send queue full" so the caller can slow down.
+NoiseCipherState.MAX_PENDING_SENDS = 1024;
 
 // ── Noise SymmetricState ──────────────────────────────────────────────────────
 
@@ -702,7 +802,7 @@ class NoiseHandshake {
         const hs = new NoiseHandshake();
         hs.pattern = opts.pattern;
         hs.suite = opts.suite;
-        if (NOISE_SUITES_JS.indexOf(hs.suite) === -1) {
+        if (noiseSuitesJs().indexOf(hs.suite) === -1) {
             throw new Error('unsupported Noise suite: ' + hs.suite);
         }
         const script = NOISE_MESSAGE_PATTERNS[hs.pattern];
@@ -863,7 +963,7 @@ class NoiseTransport {
 function selectNoiseOptions(serverPatterns, serverSuites, pinnedRemoteKey) {
     // walk OUR preference-ordered list (ChaCha first) so the default suite wins
     // whenever both peers support it, regardless of the server's list order
-    const suite = NOISE_SUITES_JS.find(s => (serverSuites || []).indexOf(s) !== -1);
+    const suite = noiseSuitesJs().find(s => (serverSuites || []).indexOf(s) !== -1);
     if (!suite) return null;
     if (pinnedRemoteKey && (serverPatterns || []).indexOf(NOISE_PATTERN_KK) !== -1) {
         return { pattern: NOISE_PATTERN_KK, suite };
@@ -893,12 +993,13 @@ function buildNoisePrologue(helloPayload, handshakePayload, protocolName) {
 // server-side configuration. Requires @noble/hashes (bundled in Node; in the
 // browser expose it via globalThis.HiveMindNoble — see the readme).
 async function derivePskArgon2(password, nodeId) {
-    if (!_argon2id) {
+    const argon2id = _noble().argon2id;
+    if (!argon2id) {
         throw new Error('argon2id unavailable: @noble/hashes not loaded ' +
             '(browser bundle must expose globalThis.HiveMindNoble.argon2id)');
     }
     const salt = await sha256(new TextEncoder().encode(nodeId || ''));
-    return _argon2id(new TextEncoder().encode(password), salt,
+    return argon2id(new TextEncoder().encode(password), salt,
         { t: 3, m: 64 * 1024, p: 1, dkLen: 32 });
 }
 
@@ -961,14 +1062,85 @@ function _hasLocalStorage() {
     }
 }
 
+// SHA-256, synchronous, for the storage key name only. connect() is
+// synchronous and Web Crypto digests are async. Round constants come from the
+// fractional parts of the square and cube roots of the first primes (FIPS 180-4).
+const _SHA256_INIT = new Uint32Array(8);
+const _SHA256_K = new Uint32Array(64);
+(function _sha256Constants() {
+    let n = 2, i = 0;
+    while (i < 64) {
+        let prime = true;
+        for (let d = 2; d * d <= n; d++) if (n % d === 0) { prime = false; break; }
+        if (prime) {
+            if (i < 8) _SHA256_INIT[i] = ((Math.sqrt(n) % 1) * 4294967296) >>> 0;
+            _SHA256_K[i++] = ((Math.cbrt(n) % 1) * 4294967296) >>> 0;
+        }
+        n++;
+    }
+})();
+
+function _sha256Sync(msg) {
+    const len = msg.length;
+    const total = (len + 9 + 63) & ~63;
+    const buf = new Uint8Array(total);
+    buf.set(msg);
+    buf[len] = 0x80;
+    const dv = new DataView(buf.buffer);
+    dv.setUint32(total - 8, Math.floor(len / 0x20000000));
+    dv.setUint32(total - 4, (len << 3) >>> 0);
+    const H = _SHA256_INIT.slice();
+    const w = new Uint32Array(64);
+    const K = _SHA256_K;
+    for (let off = 0; off < total; off += 64) {
+        for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4);
+        for (let i = 16; i < 64; i++) {
+            const x = w[i - 15], y = w[i - 2];
+            const s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
+            const s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+        }
+        let a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+        for (let i = 0; i < 64; i++) {
+            const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+            const T1 = (h + S1 + ((e & f) ^ (~e & g)) + K[i] + w[i]) | 0;
+            const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+            const T2 = (S0 + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+            h = g; g = f; f = e; e = (d + T1) | 0; d = c; c = b; b = a; a = (T1 + T2) | 0;
+        }
+        H[0] += a; H[1] += b; H[2] += c; H[3] += d; H[4] += e; H[5] += f; H[6] += g; H[7] += h;
+    }
+    const out = new Uint8Array(32);
+    const odv = new DataView(out.buffer);
+    for (let i = 0; i < 8; i++) odv.setUint32(i * 4, H[i]);
+    return out;
+}
+
+// Any script on the origin can list localStorage key names, so the name
+// carries a SHA-256 digest of host, port and access key, not the access key
+// itself. The JSON array keeps a ':' in a field from joining two hubs.
 function _noiseStorageKey(host, port, accessKey) {
+    const id = JSON.stringify([String(host), String(port), String(accessKey)]);
+    return 'hivemind:noise-static-key:v2:' + toHex(_sha256Sync(new TextEncoder().encode(id)));
+}
+
+// The name used before the digest. Read once to migrate a stored key, so a
+// client that upgrades keeps the static key the server has pinned.
+function _legacyNoiseStorageKey(host, port, accessKey) {
     return 'hivemind:noise-static-key:' + host + ':' + port + ':' + accessKey;
 }
 
-function _loadPersistedNoiseStaticKey(key) {
+function _loadPersistedNoiseStaticKey(key, legacyKey) {
     if (_hasLocalStorage()) {
         try {
-            const hex = localStorage.getItem(key);
+            let hex = localStorage.getItem(key);
+            if (!hex && legacyKey) {
+                hex = localStorage.getItem(legacyKey);
+                if (hex) {
+                    localStorage.setItem(key, hex);
+                    localStorage.removeItem(legacyKey);
+                }
+            }
             return hex ? fromHex(hex) : null;
         } catch (e) {
             console.warn('HiveMind: localStorage unavailable, cannot load persisted Noise static key', e);
@@ -978,10 +1150,11 @@ function _loadPersistedNoiseStaticKey(key) {
     return _nodeNoiseStaticKeyCache.has(key) ? _nodeNoiseStaticKeyCache.get(key) : null;
 }
 
-function _persistNoiseStaticKey(key, priv) {
+function _persistNoiseStaticKey(key, priv, legacyKey) {
     if (_hasLocalStorage()) {
         try {
             localStorage.setItem(key, toHex(priv));
+            if (legacyKey) localStorage.removeItem(legacyKey);
         } catch (e) {
             console.warn('HiveMind: localStorage unavailable, Noise static key will not persist across reloads', e);
         }
@@ -1080,10 +1253,11 @@ JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, pa
     // wins and gets persisted too, so future connects without the option
     // still pick it up.
     var noiseStorageKey = _noiseStorageKey(host, port, accessKey);
+    var legacyNoiseStorageKey = _legacyNoiseStorageKey(host, port, accessKey);
     if (this._noiseStaticKey) {
-        _persistNoiseStaticKey(noiseStorageKey, this._noiseStaticKey);
+        _persistNoiseStaticKey(noiseStorageKey, this._noiseStaticKey, legacyNoiseStorageKey);
     } else {
-        var storedNoiseStaticKey = _loadPersistedNoiseStaticKey(noiseStorageKey);
+        var storedNoiseStaticKey = _loadPersistedNoiseStaticKey(noiseStorageKey, legacyNoiseStorageKey);
         if (storedNoiseStaticKey) {
             this._noiseStaticKey = storedNoiseStaticKey;
         } else {
@@ -1098,8 +1272,11 @@ JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, pa
     this._serverHandshakePayload = null;
     this._noiseHandshake = null;
     this._noiseTransport = null;
+    this._abortReason = null;
 
-    var authToken = btoa(username + ':' + accessKey);
+    // The hub percent-decodes the query and decodes the base64 as UTF-8, so
+    // encode UTF-8 first, then percent-encode ("+" would arrive as a space).
+    var authToken = encodeURIComponent(_utf8ToBase64(username + ':' + accessKey));
     // A hardcoded 'ws://' cannot reach any hub behind TLS, and a browser on an
     // HTTPS page refuses a ws:// socket outright as mixed content — so the
     // client could not be used from the one place it exists for. `host` may
@@ -1123,6 +1300,7 @@ JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, pa
     this.ws.onopen    = function (e) { if (self._isCurrent(gen)) self._onWsOpen(e); };
     this.ws.onmessage = function (e) { if (self._isCurrent(gen)) return self._onWsMessage(e); };
     this.ws.onclose   = function (e) { if (self._isCurrent(gen)) self._onWsClose(e); };
+    this.ws.onerror   = function (e) { if (self._isCurrent(gen)) self._onWsError(e); };
     return this.ws;
 };
 
@@ -1231,7 +1409,45 @@ JarbasHiveMind.prototype._assertCurrent = function (gen) {
     }
 };
 
+// A socket error after READY is reported here. Before READY, the close that
+// follows the error reports it, so the caller gets one error, not two.
+JarbasHiveMind.prototype._onWsError = function (event) {
+    if (this._state !== States.READY) return;
+    var detail = event && event.message ? ': ' + event.message : '';
+    this._safeHiveError(new Error('HiveMind WebSocket error' + detail));
+};
+
+// onHiveError is consumer code. An exception in it must not escape into the
+// socket event loop as an unhandled rejection.
+JarbasHiveMind.prototype._safeHiveError = function (err) {
+    try {
+        this.onHiveError(err);
+    } catch (e) {
+        console.error('HiveMind: onHiveError threw', e);
+    }
+};
+
+// Every incoming frame goes through here. An exception in a handler or in a
+// consumer hook reaches onHiveError instead of an unhandled promise
+// rejection. Before READY, a handshake step that fails closes the
+// connection, and the close reports the reason. A failure that surfaces
+// after the connection it belonged to has closed (its generation moved on)
+// is not reported: that connection already reported its own close.
 JarbasHiveMind.prototype._onWsMessage = async function (event) {
+    var gen = this._generation;
+    try {
+        await this._handleWsMessage(event);
+    } catch (e) {
+        if (!this._isCurrent(gen)) return;
+        if (this._state < States.READY) {
+            this._abortNoise('handshake failed: ' + (e && e.message ? e.message : e));
+        } else {
+            this._safeHiveError(e);
+        }
+    }
+};
+
+JarbasHiveMind.prototype._handleWsMessage = async function (event) {
     var gen = this._generation;
     // Binary frame path (post-handshake binarize mode)
     if (event.data instanceof ArrayBuffer) {
@@ -1280,8 +1496,14 @@ JarbasHiveMind.prototype._onWsClose = function (event) {
         // (from a premature log) and then silence, with no error and no
         // onHiveDisconnected reason to explain it.
         var reason = (event && event.reason) ? (': ' + event.reason) : '';
+        var abortReason = this._abortReason;
+        this._abortReason = null;
         var message;
-        if (closeCode === 1008) {
+        if (abortReason) {
+            // this client closed the connection: say why
+            message = 'HiveMind connection aborted by the client: ' + abortReason +
+                ' (close code ' + (closeCode !== undefined ? closeCode : 'unknown') + ')' + reason;
+        } else if (closeCode === 1008) {
             // HIVEMIND-WIRE-1: 1008 (Policy Violation) means the server
             // rejected the credentials/handshake — fatal, not a transient drop.
             message = 'HiveMind connection refused: credentials rejected by server (close code 1008)' + reason;
@@ -1289,7 +1511,7 @@ JarbasHiveMind.prototype._onWsClose = function (event) {
             message = 'HiveMind connection refused before handshake completed (close code ' +
                 (closeCode !== undefined ? closeCode : 'unknown') + ')' + reason;
         }
-        this.onHiveError(new Error(message));
+        this._safeHiveError(new Error(message));
     }
     this.onHiveDisconnected();
 };
@@ -1400,7 +1622,7 @@ JarbasHiveMind.prototype._resolveNoisePsk = async function (payload) {
     }
     // 3. password via argon2id — the server DEFAULT; derives the SAME PSK as
     //    core with no server-side configuration (needs @noble/hashes)
-    if (this._password && _argon2id) {
+    if (this._password && _noble().argon2id) {
         return await derivePskArgon2(this._password, this._serverNodeId || '');
     }
     // 4. no PSK and argon2id unavailable (minimal browser bundle without @noble)
@@ -1501,6 +1723,8 @@ JarbasHiveMind.prototype._receiveNoiseHandshake = async function (payload) {
 JarbasHiveMind.prototype._abortNoise = function (reason) {
     // fatal handshake failure — reject the connection (§3.4.3)
     console.error('HiveMind: aborting protocol v3 connection: ' + reason);
+    // kept for _onWsClose, which reports it through onHiveError
+    this._abortReason = reason;
     this._noiseHandshake = null;
     this._noiseTransport = null;
     this._state = States.DISCONNECTED;
@@ -1529,8 +1753,32 @@ JarbasHiveMind.prototype._receiveHandshakeResponse = async function (payload) {
     this._cipher   = payload.cipher   || 'AES-GCM';
     this._binarize = this._serverSupportsBinarize;
 
-    // Compute salt = XOR(own_iv, server_iv) then derive 32-byte session key
+    // Check the server envelope before we use its IV, as the Python client does
+    // (poorman_handshake receive_and_verify -> match_hsub). What this proves: the
+    // envelope is iv || SHA-256(iv || password) for this client's password, so a
+    // server that builds its own envelope with a wrong password is refused.
+    // What it does not prove: that the server knows the password. A server can
+    // echo this client's own envelope back, and that envelope matches. The salt
+    // is then XOR(iv, iv), eight zero bytes. The session key is still
+    // PBKDF2(password, salt), so that server cannot read the traffic, but the
+    // check gives no proof of password knowledge in that case.
+    // The generation is read before the first await: a close during the
+    // envelope check must not let this connection refuse, or key, a newer one.
     var gen = this._generation;
+    var envelopeMatches = typeof serverEnvelope === 'string'
+        && (await this._handshake.matchHsub(serverEnvelope));
+    if (!this._isCurrent(gen)) return;  // closed during the envelope check
+    if (!envelopeMatches) {
+        // _onWsClose reports the reason once. A direct onHiveError here was
+        // followed by a second, misleading "refused" error from the close.
+        this._abortReason = 'handshake failed: the server envelope does not match the password';
+        this._state = States.DISCONNECTED;
+        this._sessionKey = null;
+        try { this.ws.close(); } catch (_) {}
+        return;
+    }
+
+    // Compute salt = XOR(own_iv, server_iv) then derive 32-byte session key
     this._handshake.receiveHandshake(serverEnvelope);
     var sessionKey = await this._handshake.deriveSecret();
     if (!this._isCurrent(gen)) return;  // closed during key derivation
@@ -1722,23 +1970,34 @@ if (typeof globalThis !== 'undefined') {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Node.js / CommonJS export
+// Node.js / CommonJS export, and the native-ESM hand-off
 // ─────────────────────────────────────────────────────────────────────────────
 
+// One export object for both cases. Under CommonJS it is module.exports. A
+// browser that imports hivemind.mjs with <script type="module"> loads this
+// file as a module: there is no `module`, and a module scope hides the
+// declarations above, so the object goes on globalThis.HiveMindJS for
+// hivemind.mjs to read.
+const HIVEMIND_EXPORTS = {
+    JarbasHiveMind, PasswordHandShake, States,
+    encryptAesGcm, decryptAesGcm,
+    encryptAesGcmBin, decryptAesGcmBin,
+    encodeBitstring, decodeBitstring,
+    BIN_TYPES, MSG_TYPE_TO_INT, INT_TO_MSG_TYPE,
+    // protocol v3 (Noise)
+    NoiseHandshake, NoiseTransport, NoiseCipherState, NoiseSymmetricState,
+    selectNoiseOptions, buildNoisePrologue, canonicalJson,
+    derivePskPBKDF2, derivePskArgon2,
+    noiseHkdf, x25519, x25519PublicFromPrivate,
+    NOISE_PATTERN_XX, NOISE_PATTERN_KK,
+    NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM, noiseSuitesJs,
+    // kept for callers of the old constant; now read at access time
+    get NOISE_SUITES_JS() { return noiseSuitesJs(); },
+    HM_VERSION, HM_LEGACY_HUB_REMOVAL_VERSION
+};
+
 if (typeof module !== 'undefined') {
-    module.exports = {
-        JarbasHiveMind, PasswordHandShake, States,
-        encryptAesGcm, decryptAesGcm,
-        encryptAesGcmBin, decryptAesGcmBin,
-        encodeBitstring, decodeBitstring,
-        BIN_TYPES, MSG_TYPE_TO_INT, INT_TO_MSG_TYPE,
-        // protocol v3 (Noise)
-        NoiseHandshake, NoiseTransport, NoiseCipherState, NoiseSymmetricState,
-        selectNoiseOptions, buildNoisePrologue, canonicalJson,
-        derivePskPBKDF2, derivePskArgon2,
-        noiseHkdf, x25519, x25519PublicFromPrivate,
-        NOISE_PATTERN_XX, NOISE_PATTERN_KK,
-        NOISE_SUITE_CHACHA, NOISE_SUITE_AESGCM, NOISE_SUITES_JS,
-        HM_VERSION, HM_LEGACY_HUB_REMOVAL_VERSION
-    };
+    module.exports = HIVEMIND_EXPORTS;
+} else if (typeof globalThis !== 'undefined') {
+    globalThis.HiveMindJS = HIVEMIND_EXPORTS;
 }

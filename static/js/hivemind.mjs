@@ -7,7 +7,12 @@
 // never existed. This wrapper is that half: it re-exports the same objects, so
 // there is one implementation and no second copy to drift.
 
-import mod from './hivemind.js';
+// Node imports hivemind.js as CommonJS and gives module.exports as the
+// default export. A browser with no bundler imports it as a module: it has no
+// default export, and the file puts the same object on globalThis.HiveMindJS.
+import * as cjs from './hivemind.js';
+
+const mod = cjs.default ?? globalThis.HiveMindJS;
 
 export const {
     JarbasHiveMind, PasswordHandShake, States,
