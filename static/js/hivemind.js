@@ -1267,6 +1267,12 @@ JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, pa
     this._serverHandshakePayload = null;
     this._noiseHandshake = null;
     this._noiseTransport = null;
+    // the plaintext guard in _onWsMessage keys on "a session key exists", so a
+    // key left over from an earlier session must not outlive this connect()
+    this._sessionKey = null;
+    // a handshake that failed on the previous connection leaves the guard set
+    // on purpose; a new connection starts with it clear
+    this._handshakeInProgress = false;
     this._abortReason = null;
 
     // The hub percent-decodes the query and decodes the base64 as UTF-8, so
@@ -1425,18 +1431,49 @@ JarbasHiveMind.prototype._handleWsMessage = async function (event) {
         return;
     }
 
-    if (this._state < States.READY) {
-        await this._handleHandshakeMessage(msg);
+    // HIVEMIND-CRYPTO-1 §3.5 anchors on Split(), the moment the key exists, not
+    // on READY. The key is set before the encrypted HELLO is awaited, so a gate
+    // on READY let a plaintext frame that arrived in that window reach the
+    // handshake handler and replace the session key.
+    var keyEstablished = !!(this._sessionKey || this._noiseTransport);
+    if (this._state < States.READY && !keyEstablished) {
+        // The key is only assigned after an await (PBKDF2, argon2id, Web Crypto),
+        // so a guard on the key alone leaves that window open. Handle one
+        // handshake frame at a time: a hub sends each HELLO or HANDSHAKE and then
+        // waits for this client's reply, so a second handshake frame that
+        // arrives while one is still being handled is refused, and it cannot
+        // replace the salt or the key.
+        if (this._handshakeInProgress) {
+            this.onHiveError(new Error('HiveMind: refused a handshake frame that arrived while another was being handled'));
+            return;
+        }
+        this._handshakeInProgress = true;
+        try {
+            await this._handleHandshakeMessage(msg);
+            this._handshakeInProgress = false;
+        } catch (e) {
+            // A handshake step that throws must not clear the guard: with no
+            // key assigned, a cleared guard would let the next frame start a
+            // fresh handshake on this connection. The guard stays set and
+            // connect() resets it. The throw goes on to _onWsMessage, which
+            // aborts the connection with the reason and closes the socket.
+            throw e;
+        }
     } else {
-        // Decrypt if the raw frame is an encrypted payload
-        if (msg.ciphertext) {
-            try {
-                var plaintext = await this._decrypt(msg);
-                msg = JSON.parse(plaintext);
-            } catch (e) {
-                console.error('HiveMind: decryption failed', e);
-                return;
-            }
+        // After the key exists, reject any message that is not encrypted. A
+        // Noise session carries every message as a binary transport message,
+        // so a text frame is never valid there. A legacy hub encrypts every
+        // post-handshake text frame as {ciphertext: ...}.
+        if (this._noiseTransport || !msg || !msg.ciphertext) {
+            this.onHiveError(new Error('HiveMind: dropped an unencrypted text frame after the handshake'));
+            return;
+        }
+        try {
+            var plaintext = await this._decrypt(msg);
+            msg = JSON.parse(plaintext);
+        } catch (e) {
+            console.error('HiveMind: decryption failed', e);
+            return;
         }
         this._handleUserMessage(msg);
     }
@@ -1503,7 +1540,23 @@ JarbasHiveMind.prototype._handleServerHandshake = async function (payload) {
         // protocol v3: server's Noise handshake message
         await this._receiveNoiseHandshake(payload);
     } else if ('envelope' in payload) {
-        // Server is responding to our HANDSHAKE with its own envelope
+        // Server is responding to our HANDSHAKE with its own envelope. That is
+        // only valid after this client sent a legacy HANDSHAKE, which sets the
+        // IV. During a Noise handshake, or before any handshake, there is no IV,
+        // and receiveHandshake would dereference null and throw.
+        // Both refusals throw. The _onWsMessage wrapper (#26) turns a throw
+        // before READY into an abort with the reason and a close, so a
+        // connection that cannot complete does not stay open.
+        if (this._noiseHandshake || !this._handshake || !this._handshake.iv) {
+            throw new Error('refused a legacy handshake response that this client did not ask for');
+        }
+        // An envelope is iv || SHA-256(iv || password) as hex, 48 to 80
+        // characters (the bounds matchHsub uses). Anything else is refused before
+        // it is used: a non-string throws in ivFromHsub, and an empty or short
+        // string derives a key from a degenerate salt and reaches READY deaf.
+        if (typeof payload.envelope !== 'string' || !/^[0-9a-fA-F]{48,80}$/.test(payload.envelope)) {
+            throw new Error('refused a malformed legacy handshake envelope');
+        }
         await this._receiveHandshakeResponse(payload);
     } else {
         // Server is requesting that we start the handshake; store its binarize preference
@@ -1827,7 +1880,9 @@ JarbasHiveMind.prototype._handleBinaryWsMessage = async function (buffer) {
     try {
         plaintext = await decryptAesGcmBin(this._sessionKey, frame);
     } catch (e) {
+        // a dropped frame is reported the same way as on the text path
         console.error('HiveMind: binary decrypt failed', e);
+        this.onHiveError(new Error('HiveMind: dropped a binary frame that failed to decrypt'));
         return;
     }
     var decoded;
@@ -1835,6 +1890,7 @@ JarbasHiveMind.prototype._handleBinaryWsMessage = async function (buffer) {
         decoded = await decodeBitstring(plaintext);
     } catch (e) {
         console.error('HiveMind: bitstring decode failed', e);
+        this.onHiveError(new Error('HiveMind: dropped a binary frame that failed to decode'));
         return;
     }
     var msgPayload = decoded.payload;
