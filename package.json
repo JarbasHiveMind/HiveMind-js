@@ -37,7 +37,7 @@
     "test:e2e": "python3 test/e2e/loopback_hub.py"
   },
   "devDependencies": {
-    "esbuild": "^0.25.12",
+    "esbuild": "^0.28.0",
     "ws": "^8.21.3"
   },
   "keywords": [
