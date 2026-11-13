@@ -304,7 +304,7 @@ test('a handshake step that throws keeps the guard set and closes, and connect()
     await inject(ws, { msg_type: 'shake', payload: { envelope: hub.envelope } });  // must not reject
 
     assert.equal(h._sessionKey, null);
-    assert.equal(h._handshakeInProgress, true, 'a failed derivation must not reopen the handler');
+    assert.equal(h._handshakeStep, 3, 'a failed derivation must not reopen the handler');
     assert.equal(ws.readyState, 3, 'the connection must be closed');
     assert.ok(log.some((l) => /^error:.*handshake failed/.test(l)), JSON.stringify(log));
 
@@ -315,5 +315,5 @@ test('a handshake step that throws keeps the guard set and closes, and connect()
 
     // the legacy password handshake is opt-in since #20 (HIVEMIND-CRYPTO-1 §3)
     h.connect('hub', 5678, 'user', 'key', PASSWORD, { legacyHub: true });
-    assert.equal(h._handshakeInProgress, false, 'a new connection starts with the guard clear');
+    assert.equal(h._handshakeStep, 0, 'a new connection starts with no handshake frame received');
 });
