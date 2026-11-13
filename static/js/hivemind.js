@@ -1272,12 +1272,14 @@ JarbasHiveMind.prototype.connect = function (host, port, username, accessKey, pa
     this._serverHandshakePayload = null;
     this._noiseHandshake = null;
     this._noiseTransport = null;
-    // the plaintext guard in _onWsMessage keys on "a session key exists", so a
+    // the plaintext guard in _admitTextFrame keys on "a session key exists", so a
     // key left over from an earlier session must not outlive this connect()
     this._sessionKey = null;
-    // a handshake that failed on the previous connection leaves the guard set
-    // on purpose; a new connection starts with it clear
-    this._handshakeInProgress = false;
+    // frames are handled one at a time, in arrival order, per connection; a
+    // handshake that failed on the previous connection leaves its step set on
+    // purpose, and a new connection starts from no handshake frame received
+    this._frameQueue = Promise.resolve();
+    this._handshakeStep = 0;
     this._abortReason = null;
 
     // The hub percent-decodes the query and decodes the base64 as UTF-8, so
@@ -1433,16 +1435,78 @@ JarbasHiveMind.prototype._safeHiveError = function (err) {
     }
 };
 
-// Every incoming frame goes through here. An exception in a handler or in a
-// consumer hook reaches onHiveError instead of an unhandled promise
-// rejection. Before READY, a handshake step that fails closes the
-// connection, and the close reports the reason. A failure that surfaces
-// after the connection it belonged to has closed (its generation moved on)
-// is not reported: that connection already reported its own close.
-JarbasHiveMind.prototype._onWsMessage = async function (event) {
+// Every incoming frame goes through here. A hub sends HELLO and HANDSHAKE back
+// to back, and handling a frame awaits (PSK derivation, Web Crypto), so frames
+// are handled strictly in arrival order: each waits until the one before it is
+// done. The returned promise settles once this frame has been handled.
+JarbasHiveMind.prototype._onWsMessage = function (event) {
     var gen = this._generation;
+    var frame = event.data;
+    if (!(frame instanceof ArrayBuffer)) {
+        try {
+            frame = JSON.parse(frame);
+        } catch (e) {
+            console.error('HiveMind: failed to parse server message', e);
+            return Promise.resolve();
+        }
+        if (!this._admitTextFrame(frame)) return Promise.resolve();
+    }
+    var self = this;
+    var handled = this._frameQueue.then(function () { return self._runWsMessage(frame, gen); });
+    this._frameQueue = handled;
+    return handled;
+};
+
+// Decides on arrival, before the frame waits its turn, so the decision does
+// not depend on how far the frames ahead of it have got.
+// HIVEMIND-CRYPTO-1 §3.5 anchors on Split(), the moment the key exists, not on
+// READY: from then on a text frame that is not encrypted is dropped. Before
+// that, each handshake frame is accepted only in the order a hub sends it
+// (HELLO, HANDSHAKE, then the reply to this client's HANDSHAKE), and once, so
+// a plaintext frame cannot replace the salt, the PSK inputs or the key once
+// key establishment has begun.
+JarbasHiveMind.prototype._admitTextFrame = function (msg) {
+    if (this._sessionKey || this._noiseTransport) {
+        // A Noise session carries every message as a binary transport
+        // message, so a text frame is never valid there. A legacy hub encrypts
+        // every post-handshake text frame as {ciphertext: ...}.
+        if (this._noiseTransport || !msg || !msg.ciphertext) {
+            this._safeHiveError(new Error('HiveMind: dropped an unencrypted text frame after the handshake'));
+            return false;
+        }
+        return true;
+    }
+    var step = handshakeStep(msg);
+    if (!step) return true;
+    if (step <= this._handshakeStep) {
+        this._safeHiveError(new Error('HiveMind: refused a handshake frame that would replace one already received'));
+        return false;
+    }
+    this._handshakeStep = step;
+    return true;
+};
+
+// The position of a handshake frame in the order a hub sends them, 0 for any
+// other frame. A HANDSHAKE that carries a legacy envelope or a Noise message is
+// the hub's reply to this client's HANDSHAKE.
+function handshakeStep(msg) {
+    if (!msg || typeof msg !== 'object') return 0;
+    if (msg.msg_type === 'hello') return 1;
+    if (msg.msg_type !== 'shake') return 0;
+    var payload = (msg.payload && typeof msg.payload === 'object') ? msg.payload : {};
+    return ('envelope' in payload || (payload.noise && payload.noise.msg)) ? 3 : 2;
+}
+
+// An exception in a handler or in a consumer hook reaches onHiveError instead
+// of an unhandled promise rejection. Before READY, a handshake step that fails
+// closes the connection, and the close reports the reason. A frame whose
+// connection has closed (its generation moved on) is not handled, and a
+// failure that surfaces after that close is not reported: that connection
+// already reported its own close.
+JarbasHiveMind.prototype._runWsMessage = async function (frame, gen) {
+    if (!this._isCurrent(gen)) return;
     try {
-        await this._handleWsMessage(event);
+        await this._handleWsMessage(frame);
     } catch (e) {
         if (!this._isCurrent(gen)) return;
         if (this._state < States.READY) {
@@ -1453,55 +1517,23 @@ JarbasHiveMind.prototype._onWsMessage = async function (event) {
     }
 };
 
-JarbasHiveMind.prototype._handleWsMessage = async function (event) {
+JarbasHiveMind.prototype._handleWsMessage = async function (msg) {
     var gen = this._generation;
     // Binary frame path (post-handshake binarize mode)
-    if (event.data instanceof ArrayBuffer) {
-        await this._handleBinaryWsMessage(event.data);
+    if (msg instanceof ArrayBuffer) {
+        await this._handleBinaryWsMessage(msg);
         return;
     }
 
-    var msg;
-    try {
-        msg = JSON.parse(event.data);
-    } catch (e) {
-        console.error('HiveMind: failed to parse server message', e);
-        return;
-    }
-
-    // HIVEMIND-CRYPTO-1 §3.5 anchors on Split(), the moment the key exists, not
-    // on READY. The key is set before the encrypted HELLO is awaited, so a gate
-    // on READY let a plaintext frame that arrived in that window reach the
-    // handshake handler and replace the session key.
+    // A frame admitted before the key existed can reach its turn after the
+    // key was set, so the key is checked again here.
     var keyEstablished = !!(this._sessionKey || this._noiseTransport);
     if (this._state < States.READY && !keyEstablished) {
-        // The key is only assigned after an await (PBKDF2, argon2id, Web Crypto),
-        // so a guard on the key alone leaves that window open. Handle one
-        // handshake frame at a time: a hub sends each HELLO or HANDSHAKE and then
-        // waits for this client's reply, so a second handshake frame that
-        // arrives while one is still being handled is refused, and it cannot
-        // replace the salt or the key.
-        if (this._handshakeInProgress) {
-            this.onHiveError(new Error('HiveMind: refused a handshake frame that arrived while another was being handled'));
-            return;
-        }
-        this._handshakeInProgress = true;
-        try {
-            await this._handleHandshakeMessage(msg);
-            this._handshakeInProgress = false;
-        } catch (e) {
-            // A handshake step that throws must not clear the guard: with no
-            // key assigned, a cleared guard would let the next frame start a
-            // fresh handshake on this connection. The guard stays set and
-            // connect() resets it. The throw goes on to _onWsMessage, which
-            // aborts the connection with the reason and closes the socket.
-            throw e;
-        }
+        // A throw goes on to _runWsMessage, which aborts the connection with
+        // the reason. The handshake step stays where it is until connect(),
+        // so no later frame starts a fresh handshake on this connection.
+        await this._handleHandshakeMessage(msg);
     } else {
-        // After the key exists, reject any message that is not encrypted. A
-        // Noise session carries every message as a binary transport message,
-        // so a text frame is never valid there. A legacy hub encrypts every
-        // post-handshake text frame as {ciphertext: ...}.
         if (this._noiseTransport || !msg || !msg.ciphertext) {
             this.onHiveError(new Error('HiveMind: dropped an unencrypted text frame after the handshake'));
             return;
@@ -1586,7 +1618,7 @@ JarbasHiveMind.prototype._handleServerHandshake = async function (payload) {
         // only valid after this client sent a legacy HANDSHAKE, which sets the
         // IV. During a Noise handshake, or before any handshake, there is no IV,
         // and receiveHandshake would dereference null and throw.
-        // Both refusals throw. The _onWsMessage wrapper (#26) turns a throw
+        // Both refusals throw. _runWsMessage turns a throw
         // before READY into an abort with the reason and a close, so a
         // connection that cannot complete does not stay open.
         if (this._noiseHandshake || !this._handshake || !this._handshake.iv) {
